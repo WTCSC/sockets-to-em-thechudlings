@@ -12,7 +12,7 @@ Output:
 ```
 🚀 Chat server listening on ws://0.0.0.0:8080
    Expose publicly with:  tailscale funnel --bg 8080
-   Public URL:            wss://pop-os.tail76b4d2.ts.net
+   Public URL:            wss://....ts.net
 ```
 
 ### 2. Expose to the Internet (Tailscale Funnel)
@@ -20,7 +20,7 @@ In a second terminal, run **once** (persists across reboots):
 ```bash
 tailscale funnel --bg 8080
 ```
-Your server is now live at `wss://pop-os.tail76b4d2.ts.net` 🌐
+Your server is now live at `wss://...ts.net` 🌐
 
 ### 3. Start a Client
 
@@ -33,7 +33,7 @@ python3 client.py
 **Connect to Chudserve:**
 Select **Chudserve** in the login screen or use:
 ```bash
-python3 client.py wss://mediastation.tail76b4d2.ts.net
+python3 client.py wss://...ts.net
 ```
 
 ## Features
