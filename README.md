@@ -2,6 +2,18 @@
 
 A multi-user chat app built with Python `websockets` + `tkinter`. Accessible locally **or anywhere on the internet** via Tailscale Funnel.
 
+## TODO:
+
+Does someone wanna add:
+- Themes?
+- Change the UX?
+- Add a settings menu?
+- Support video playback?
+- Show usernames next to media? (Currently shows "?")
+- Add message editing and deleting?
+- Add a "who's online" list?
+- Profile Pictures?
+
 ## Quick Start
 
 ### 1. Start the Server
