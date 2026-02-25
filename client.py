@@ -1,4 +1,6 @@
 import asyncio
+import re
+import subprocess
 import base64
 import io
 import json
@@ -9,16 +11,29 @@ import threading
 import time
 import tkinter as tk
 from datetime import datetime
-from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog
 from PIL import Image, ImageTk, ImageSequence
+import platform
+
+# macOS tk.Button ignores bg colors; use tkmacosx if available
+if platform.system() == "Darwin":
+    try:
+        from tkmacosx import Button as tkButton
+    except ImportError:
+        tkButton = tk.Button
+else:
+    tkButton = tk.Button
 
 import hashlib
 import uuid
 import websockets
+import tempfile
+import shutil
 
 DEFAULT_URL = "ws://localhost:8080"
 CHUDSERVE_URL = "wss://mediastation.tail76b4d2.ts.net"
 CHANNELS = ["General", "Testing", "ChudSpeaks"]
+SESSION_FILE = ".chud_session"
 
 class AnimatedImage:
     def __init__(self, label, data, chat_display):
@@ -51,12 +66,29 @@ class ChatClient:
         self.ws = None
         self.loop = None
         self.root = tk.Tk()
-        self.root.title("NAVIChud 💬")
-        self.root.geometry("800x800")
+        self.root.title("NAVICHUD")
+        self.root.geometry("1100x750") # Slightly larger default
         self.root.configure(bg="#1E1E2E")
+        
+        # High DPI support
+        try:
+            from ctypes import windll
+            windll.shcore.SetProcessDpiAwareness(1)
+        except: pass
+        # Scale for Mac/Linux
+        self.root.tk.call('tk', 'scaling', 1.33)
+
+        self.status_var = tk.StringVar(value="Waiting to join...")
+        self.remember_var = tk.BooleanVar(value=True)
+        self.sync_var = tk.BooleanVar(value=True)
+        self.joined = False
+        self.username = "Anonymous"
+        self.server_url = self.server_url_default
+        self.sync_requested = True 
         
         self.images = []
         self.file_refs = {}
+        self.file_data_cache = {} # mid (fid) -> bytes
         self.file_data_received = set()
         
         self.current_channel = "General"
@@ -69,13 +101,21 @@ class ChatClient:
         self.sync_buffer = []
         self.msg_widgets = {} # {msg_id: (start_index, end_index)}
         self.msg_senders = {} # {msg_id: sender} for rights checking
+        self.msg_content_cache = {} # {msg_id: content_text} for reply preview
         
-        self.username = "Anonymous"
-        self.server_url = self.server_url_default
-        self.sync_requested = True 
-        self.joined = False
+        self.playback_proc = None
         
-        # Start background connection immediately to anticipate join
+        # New Feature State
+        self.online_users = {} # {username: status}
+        self.settings = {"notifications": True, "sound": True}
+        self.reply_target = None # msg_id
+        self.current_pm_target = None
+        self.pm_history = {} # {username: [messages]}
+        self.user_statuses = ["Online", "Away", "Busy", "Invisible"]
+        self.current_status = "Online"
+        self.chud_disabled_var = tk.BooleanVar(value=False)
+
+        # Start background connection immediately
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self._run_loop, daemon=True).start()
         
@@ -87,156 +127,286 @@ class ChatClient:
         self.login_frame = tk.Frame(self.root, bg="#1E1E2E")
         self.login_frame.pack(expand=True)
 
-        tk.Label(self.login_frame, text="NAVIChud 💬",
-                 font=("Arial", 24, "bold"), fg="#CDD6F4", bg="#1E1E2E").pack(pady=(30, 8))
+        tk.Label(self.login_frame, text="NAVICHUD",
+                 font=("Arial", 28, "bold"), fg="#CDD6F4", bg="#1E1E2E").pack(pady=(30, 12))
         
         tk.Label(self.login_frame, text="Username",
-                 font=("Arial", 11), fg="#A6ADC8", bg="#1E1E2E").pack(anchor="w", padx=60)
+                 font=("Arial", 14), fg="#A6ADC8", bg="#1E1E2E").pack(anchor="w", padx=60)
         self.user_var = tk.StringVar()
         self.user_entry = tk.Entry(self.login_frame, textvariable=self.user_var,
-                                   font=("Arial", 12), bg="#313244", fg="#CDD6F4",
+                                   font=("Arial", 14), bg="#313244", fg="#CDD6F4",
                                    insertbackground="white", relief=tk.FLAT)
-        self.user_entry.pack(fill=tk.X, padx=60, ipady=8)
+        self.user_entry.pack(fill=tk.X, padx=60, ipady=10)
 
         tk.Label(self.login_frame, text="Password",
-                 font=("Arial", 11), fg="#A6ADC8", bg="#1E1E2E").pack(anchor="w", padx=60, pady=(12, 0))
+                 font=("Arial", 14), fg="#A6ADC8", bg="#1E1E2E").pack(anchor="w", padx=60, pady=(15, 0))
         self.pass_var = tk.StringVar()
         self.pass_entry = tk.Entry(self.login_frame, textvariable=self.pass_var, show="*",
-                                   font=("Arial", 12), bg="#313244", fg="#CDD6F4",
+                                   font=("Arial", 14), bg="#313244", fg="#CDD6F4",
                                    insertbackground="white", relief=tk.FLAT)
-        self.pass_entry.pack(fill=tk.X, padx=60, ipady=8)
+        self.pass_entry.pack(fill=tk.X, padx=60, ipady=10)
 
         self.auth_mode = tk.StringVar(value="login")
         mode_frame = tk.Frame(self.login_frame, bg="#1E1E2E")
-        mode_frame.pack(pady=10)
+        mode_frame.pack(pady=15)
         tk.Radiobutton(mode_frame, text="Login", variable=self.auth_mode, value="login",
-                       bg="#1E1E2E", fg="#A6ADC8", selectcolor="#313244", activebackground="#1E1E2E").pack(side=tk.LEFT, padx=10)
+                       font=("Arial", 14), bg="#1E1E2E", fg="#A6ADC8", selectcolor="#313244", activebackground="#1E1E2E").pack(side=tk.LEFT, padx=15)
         tk.Radiobutton(mode_frame, text="Register", variable=self.auth_mode, value="register",
-                       bg="#1E1E2E", fg="#A6ADC8", selectcolor="#313244", activebackground="#1E1E2E").pack(side=tk.LEFT, padx=10)
+                       font=("Arial", 14), bg="#1E1E2E", fg="#A6ADC8", selectcolor="#313244", activebackground="#1E1E2E").pack(side=tk.LEFT, padx=15)
 
         self.server_frame = tk.Frame(self.login_frame, bg="#1E1E2E")
         tk.Label(self.server_frame, text="Server URL",
-                 font=("Arial", 11), fg="#A6ADC8", bg="#1E1E2E").pack(anchor="w", padx=60, pady=(12, 0))
+                 font=("Arial", 14), fg="#A6ADC8", bg="#1E1E2E").pack(anchor="w", padx=60, pady=(15, 0))
         self.url_var = tk.StringVar(value=self.server_url_default)
         self.url_entry = tk.Entry(self.server_frame, textvariable=self.url_var,
-                 font=("Arial", 11), bg="#313244", fg="#A6ADC8",
+                 font=("Arial", 13), bg="#313244", fg="#A6ADC8",
                  insertbackground="white", relief=tk.FLAT)
-        self.url_entry.pack(fill=tk.X, padx=60, ipady=6)
+        self.url_entry.pack(fill=tk.X, padx=60, ipady=8)
 
-        self.sync_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(self.login_frame, text="Sync Existing Messages (Last 24h)",
-                       variable=self.sync_var, font=("Arial", 10),
-                       fg="#A6ADC8", bg="#1E1E2E", activebackground="#1E1E2E",
-                       activeforeground="white", selectcolor="#313244").pack(pady=10)
+        tk.Checkbutton(self.login_frame, text="Synchronize History (last 24h)", variable=self.sync_var,
+                       font=("Arial", 11), fg="#A6ADC8", bg="#1E1E2E", activebackground="#1E1E2E",
+                       activeforeground="white", selectcolor="#313244").pack(pady=(15, 0))
 
-        join_btn = tk.Button(self.login_frame, text="Join Chat →",
+        tk.Checkbutton(self.login_frame, text="Remember Me", variable=self.remember_var,
+                       font=("Arial", 11), fg="#A6ADC8", bg="#1E1E2E", activebackground="#1E1E2E",
+                       activeforeground="white", selectcolor="#313244").pack(pady=(5, 15))
+
+        join_btn = tkButton(self.login_frame, text="JOIN CHAT",
                              command=self._start_connect,
                              bg="#89B4FA", fg="#1E1E2E", activebackground="#74C7EC",
-                             font=("Arial", 14, "bold"), relief=tk.FLAT, cursor="hand2")
-        join_btn.pack(pady=10, ipadx=30, ipady=10)
+                             font=("Arial", 14, "bold"), relief=tk.FLAT, cursor="hand2", padx=40, pady=10)
+        join_btn.pack(pady=(15, 0))
 
-        self.custom_btn = tk.Button(self.login_frame, text="⚙ Use Custom Server",
+        # Custom Server Button
+        self.custom_btn = tkButton(self.login_frame, text="SETTINGS / CUSTOM SERVER",
                                     command=self._show_server_settings,
-                                    bg="#1E1E2E", fg="#585B70", font=("Arial", 9),
-                                    relief=tk.FLAT, cursor="hand2", activebackground="#1E1E2E")
-        self.custom_btn.pack(pady=5)
+                                    bg="#313244", fg="#CDD6F4", font=("Arial", 10, "bold"),
+                                    relief=tk.FLAT, cursor="hand2", activebackground="#45475A")
+        self.custom_btn.pack(pady=10)
         self.user_entry.bind("<Return>", lambda _: self._start_connect())
+
+        # Footer Status
+        footer = tk.Frame(self.login_frame, bg="#1E1E2E")
+        footer.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
+        self.status_label = tk.Label(footer, textvariable=self.status_var, font=("Arial", 11, "italic"),
+                                     fg="#89B4FA", bg="#1E1E2E")
+        self.status_label.pack()
 
     def _show_server_settings(self):
         self.server_frame.pack(fill=tk.X, before=self.custom_btn)
         self.custom_btn.pack_forget()
 
+    def _toggle_chud_killswitch(self):
+        disabled = self.chud_disabled_var.get()
+        if self.ws:
+            self._schedule_send({"type": "chud_toggle", "disabled": disabled})
+        self._update_user_list_ui()
+        self._switch_channel(self.current_channel, force=True)
+
     def _build_chat_ui(self):
         for widget in self.root.winfo_children():
             widget.pack_forget()
 
+        # Global Footer first (so it stays at bottom)
+        footer = tk.Frame(self.root, bg="#11111B", height=28)
+        footer.pack(side=tk.BOTTOM, fill=tk.X)
+        self.status_label = tk.Label(footer, textvariable=self.status_var, font=("Arial", 10, "italic"),
+                                     fg="#585B70", bg="#11111B", padx=10)
+        self.status_label.pack(side=tk.LEFT)
+        
+        self.stop_btn = tkButton(footer, text="STOP PLAYBACK", command=self._stop_playback,
+                                  font=("Arial", 9, "bold"), bg="#F38BA8", fg="#1E1E2E",
+                                  relief=tk.FLAT, padx=10, cursor="hand2")
+
         # Layout: [Sidebar (Channels)] [Chat Area]
-        main_pane = tk.Frame(self.root, bg="#1E1E2E")
-        main_pane.pack(fill=tk.BOTH, expand=True)
+        self.main_pane = tk.Frame(self.root, bg="#1E1E2E")
+        self.main_pane.pack(fill=tk.BOTH, expand=True)
 
         # Sidebar
-        sidebar = tk.Frame(main_pane, bg="#181825", width=150)
+        sidebar = tk.Frame(self.main_pane, bg="#181825", width=200)
         sidebar.pack(side=tk.LEFT, fill=tk.Y)
-        tk.Label(sidebar, text="CHANNELS", font=("Arial", 10, "bold"), fg="#585B70", bg="#181825").pack(pady=10)
+        
+        # Header with Settings
+        header = tk.Frame(sidebar, bg="#181825")
+        header.pack(fill=tk.X, pady=(15, 5))
+        tk.Label(header, text="NAVICHUD", font=("Arial", 14, "bold"), fg="#89B4FA", bg="#181825").pack(side=tk.LEFT, padx=15)
+        tkButton(header, text="OPTIONS", command=self._open_settings, 
+                  bg="#313244", fg="#CDD6F4", relief=tk.FLAT, font=("Arial", 9, "bold"), cursor="hand2").pack(side=tk.RIGHT, padx=10)
+
+        tk.Label(sidebar, text="CHANNELS", font=("Arial", 10, "bold"), fg="#585B70", bg="#181825", anchor="w").pack(fill=tk.X, padx=15, pady=(10, 5))
         
         self.chan_buttons = {}
         for chan in CHANNELS:
-            btn = tk.Button(sidebar, text=f"# {chan}", command=lambda c=chan: self._switch_channel(c),
-                            bg="#181825", fg="#CDD6F4", relief=tk.FLAT, font=("Arial", 11),
-                            anchor="w", padx=10, cursor="hand2", activebackground="#313244")
-            btn.pack(fill=tk.X, pady=2)
+            btn = tkButton(sidebar, text=f"# {chan}", command=lambda c=chan: self._switch_channel(c),
+                            bg="#181825", fg="#CDD6F4", relief=tk.FLAT, font=("Arial", 12, "bold" if chan=="General" else "normal"),
+                            anchor="w", padx=15, pady=5, cursor="hand2", activebackground="#313244")
+            btn.pack(fill=tk.X, padx=8)
             self.chan_buttons[chan] = btn
+
+        # Online Users Section
+        tk.Label(sidebar, text="USERS ONLINE", font=("Arial", 10, "bold"), fg="#585B70", bg="#181825", anchor="w").pack(fill=tk.X, padx=15, pady=(20, 5))
+        self.user_list_frame = tk.Frame(sidebar, bg="#181825")
+        self.user_list_frame.pack(fill=tk.X)
+        self._update_user_list_ui()
+
+        # PMs Section
+        self.pm_label = tk.Label(sidebar, text="PRIVATE MESSAGES", font=("Arial", 10, "bold"), fg="#585B70", bg="#181825", anchor="w")
+        self.pm_label.pack(fill=tk.X, padx=15, pady=(20, 5))
+        self.pm_list_frame = tk.Frame(sidebar, bg="#181825")
+        self.pm_list_frame.pack(fill=tk.X)
+        self._update_pm_list_ui()
+
         self._switch_channel("General", force=True)
 
+        tkButton(sidebar, text="LOG OUT", command=self._logout,
+                  font=("Arial", 11, "bold"), bg="#181825", fg="#F38BA8",
+                  relief=tk.FLAT, cursor="hand2", padx=15, pady=10).pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=25)
+
+        tk.Checkbutton(sidebar, text="Chud Killswitch", variable=self.chud_disabled_var,
+                       command=self._toggle_chud_killswitch,
+                       bg="#181825", fg="#F38BA8", activebackground="#181825", activeforeground="#F38BA8",
+                       selectcolor="#1E1E2E", font=("Arial", 10, "bold"), cursor="hand2").pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=0)
+
         # Chat container
-        chat_container = tk.Frame(main_pane, bg="#1E1E2E")
+        chat_container = tk.Frame(self.main_pane, bg="#1E1E2E")
         chat_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.chat_display = scrolledtext.ScrolledText(
-            chat_container, state="disabled", font=("Arial", 11),
+            chat_container, state="disabled", font=("Arial", 14),
             bg="#181825", fg="#CDD6F4", insertbackground="white",
-            relief=tk.FLAT, padx=12, pady=12)
-        self.chat_display.pack(padx=10, pady=(10, 0), fill=tk.BOTH, expand=True)
-        self.chat_display.tag_config("info", foreground="#585B70", font=("Arial", 10, "italic"))
-        self.chat_display.tag_config("timestamp", foreground="#45475A", font=("Arial", 9))
-        self.chat_display.tag_config("sender_me", foreground="#89B4FA", font=("Arial", 11, "bold"))
-        self.chat_display.tag_config("sender_other", foreground="#A6E3A1", font=("Arial", 11, "bold"))
+            relief=tk.FLAT, padx=15, pady=15)
+        self.chat_display.pack(padx=12, pady=(12, 0), fill=tk.BOTH, expand=True)
+        self.chat_display.tag_config("info", foreground="#585B70", font=("Arial", 12, "italic"))
+        self.chat_display.tag_config("timestamp", foreground="#45475A", font=("Arial", 11))
+        self.chat_display.tag_config("sender_me", foreground="#89B4FA", font=("Arial", 14, "bold"))
+        self.chat_display.tag_config("sender_other", foreground="#A6E3A1", font=("Arial", 14, "bold"))
+        self.chat_display.tag_config("mention", background="#FAB387", foreground="#1E1E2E", font=("Arial", 14, "bold"))
+        self.chat_display.tag_config("reply", foreground="#585B70", font=("Arial", 12, "italic"))
         self.chat_display.tag_config("file", foreground="#F38BA8")
-        self.chat_display.tag_config("emoji_big", font=("Segoe UI Emoji", 20))
+        # Tags
+        
+        # Markdown tags
+        self.chat_display.tag_config("bold", font=("Arial", 14, "bold"))
+        self.chat_display.tag_config("italic", font=("Arial", 14, "italic"))
+        self.chat_display.tag_config("code", font=("Courier New", 13), background="#313244", foreground="#F9E2AF")
+        self.chat_display.tag_config("link", foreground="#89B4FA", underline=True)
+        self.chat_display.tag_config("channel_link", foreground="#A6E3A1", font=("Arial", 14, "bold"), underline=True)
 
         # Typing indicator
-        self.typing_label = tk.Label(chat_container, text="", font=("Arial", 9, "italic"), fg="#A6ADC8", bg="#1E1E2E", anchor="w")
-        self.typing_label.pack(fill=tk.X, padx=20)
+        self.typing_label = tk.Label(chat_container, text="", font=("Arial", 11, "italic"), fg="#A6ADC8", bg="#1E1E2E", anchor="w")
+        self.typing_label.pack(fill=tk.X, padx=20, pady=2)
 
-        # Emoji bar
-        emoji_bar = tk.Frame(chat_container, bg="#1E1E2E")
-        emoji_bar.pack(fill=tk.X, padx=10, pady=(0, 0))
-        for em in ["😊", "😂", "🔥", "👍", "👋", "🎉", "❤️", "🤔", "💯", "🚀"]:
-            tk.Button(emoji_bar, text=em, command=lambda emoji_char=em: self._send_emoji(emoji_char),
-                      bg="#1E1E2E", fg="white", relief=tk.FLAT,
-                      font=("Segoe UI Emoji", 14), cursor="hand2").pack(side=tk.LEFT)
+        # Chat display area... 
 
-        # Input row
+        self.emoji_frame = tk.Frame(chat_container, bg="#1E1E2E")
+        self.emoji_frame.pack(fill=tk.X, padx=12, pady=(0, 2))
+        
+        common_emojis = ["👍", "👎", "❤️", "😂", "🔥", "👀", "🤔", "🎉", "💀", "🤓"]
+        for emj in common_emojis:
+            tkButton(self.emoji_frame, text=emj, font=("Arial", 14), bg="#313244", fg="#CDD6F4", relief=tk.FLAT, cursor="hand2", command=lambda e=emj: self.msg_entry.insert(tk.INSERT, e)).pack(side=tk.LEFT, padx=2)
+
         input_frame = tk.Frame(chat_container, bg="#313244")
-        input_frame.pack(fill=tk.X, padx=10, pady=(6, 12))
-        self.msg_var = tk.StringVar()
-        self.msg_entry = tk.Entry(input_frame, textvariable=self.msg_var,
-                                  font=("Arial", 12), bg="#313244", fg="#CDD6F4",
+        input_frame.pack(fill=tk.X, padx=12, pady=(2, 15))
+
+        self.msg_entry = tk.Text(input_frame, height=1, undo=True,
+                                  font=("Arial", 14), bg="#313244", fg="#CDD6F4",
                                   insertbackground="white", relief=tk.FLAT)
-        self.msg_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=8, padx=(10, 5))
-        self.msg_entry.bind("<Return>", lambda _: self._send_text())
+        self.msg_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=10, padx=(12, 5))
+        
+        def _on_enter(event):
+            self._send_text()
+            return "break"
+        self.msg_entry.bind("<Return>", _on_enter)
         self.msg_entry.bind("<Key>", lambda _: self._trigger_typing())
         
-        tk.Button(input_frame, text="Send", command=self._send_text,
-                  bg="#89B4FA", fg="#1E1E2E", font=("Arial", 11, "bold"),
-                  relief=tk.FLAT, cursor="hand2").pack(side=tk.LEFT, padx=2, ipady=6, ipadx=10)
+        tkButton(input_frame, text="SEND", command=self._send_text,
+                  bg="#89B4FA", fg="#1E1E2E", font=("Arial", 12, "bold"),
+                  relief=tk.FLAT, cursor="hand2", padx=15).pack(side=tk.LEFT, padx=3, ipady=8)
         
-        tk.Button(input_frame, text="📎", command=self._send_file,
-                  bg="#45475A", fg="white", font=("Segoe UI Emoji", 12),
-                  relief=tk.FLAT, cursor="hand2").pack(side=tk.LEFT, padx=(2, 6), ipady=6, ipadx=6)
+        tkButton(input_frame, text="FILE", command=self._send_file,
+                  bg="#313244", fg="#CDD6F4", font=("Arial", 11, "bold"),
+                  relief=tk.FLAT, cursor="hand2", padx=10).pack(side=tk.LEFT, padx=3, ipady=8)
+        
+        tkButton(input_frame, text="EMOJI", command=self._show_emoji_picker,
+                  bg="#313244", fg="#CDD6F4", font=("Arial", 11, "bold"),
+                  relief=tk.FLAT, cursor="hand2", padx=10).pack(side=tk.LEFT, padx=3, ipady=8)
+        
+        # Reply Preview
+        self.reply_frame = tk.Frame(chat_container, bg="#11111B")
+        self.reply_label = tk.Label(self.reply_frame, text="", bg="#11111B", fg="#A6ADC8", font=("Arial", 11))
+        self.reply_label.pack(side=tk.LEFT, padx=10)
+        tkButton(self.reply_frame, text="CANCEL REPLY", command=self._cancel_reply, 
+                  bg="#11111B", fg="#F38BA8", relief=tk.FLAT, font=("Arial", 10, "bold")).pack(side=tk.RIGHT, padx=5)
 
         self._check_typing_timeouts()
 
     def _switch_channel(self, name, force=False):
         if self.current_channel == name and not force: return
         self.current_channel = name
-        for chan, btn in self.chan_buttons.items():
-            btn.configure(bg="#89B4FA" if chan == name else "#181825", 
-                         fg="#1E1E2E" if chan == name else "#CDD6F4")
         
-        if hasattr(self, "chat_display"):
-            self.chat_display.configure(state="normal")
-            self.chat_display.delete("1.0", tk.END)
-            self.chat_display.configure(state="disabled")
-            # Redraw cached history for this channel
-            history = self.channel_history.get(name, [])
-            for msg in history:
-                self._handle_incoming(msg, is_replay=True)
+        # UI Selection
+        all_btns = {**self.chan_buttons}
+        if hasattr(self, "user_btns"): all_btns.update(self.user_btns)
+        if hasattr(self, "pm_btns"): all_btns.update(self.pm_btns)
+        
+        for n, btn in all_btns.items():
+            if n == name:
+                btn.configure(bg="#89B4FA", fg="#1E1E2E")
+            else:
+                btn.configure(bg="#181825", fg="#CDD6F4")
+        
+        if hasattr(self, "chat_display") and self.chat_display.winfo_exists():
+            try:
+                self.chat_display.configure(state="normal")
+                self.chat_display.delete("1.0", tk.END)
+                
+                if name.startswith("@"):
+                    self.current_pm_target = name[1:]
+                    history = self.pm_history.get(self.current_pm_target, [])
+                else:
+                    self.current_pm_target = None
+                    history = self.channel_history.get(name, [])
+
+                if self.is_syncing and not history and not name.startswith("@"):
+                     self.chat_display.insert(tk.END, "\n  ─ LOADING CHAT HISTORY... ─\n", "info")
+
+                for msg in history:
+                    self._handle_incoming(msg, is_replay=True)
+            finally:
+                if self.chat_display.winfo_exists():
+                    self.chat_display.configure(state="disabled")
+                    self.chat_display.see(tk.END)
+
+    def _update_user_list_ui(self):
+        if not hasattr(self, "user_list_frame") or not self.user_list_frame.winfo_exists(): return
+        for widget in self.user_list_frame.winfo_children(): widget.destroy()
+        self.user_btns = {}
+        for user, status in sorted(self.online_users.items()):
+            if user == self.username: continue
+            if self.chud_disabled_var.get() and user == "Chudbot": continue
+            color = "#A6E3A1" if status=="Online" else "#F9E2AF" if status=="Away" else "#F38BA8"
+            btn = tkButton(self.user_list_frame, text=f"{user} ({status})", command=lambda u=user: self._switch_channel(f"@{u}"),
+                            bg="#181825", fg=color, relief=tk.FLAT, font=("Arial", 11),
+                            anchor="w", padx=15, pady=2, cursor="hand2")
+            btn.pack(fill=tk.X)
+            self.user_btns[f"@{user}"] = btn
+
+    def _update_pm_list_ui(self):
+        if not hasattr(self, "pm_list_frame") or not self.pm_list_frame.winfo_exists(): return
+        for widget in self.pm_list_frame.winfo_children(): widget.destroy()
+        self.pm_btns = {}
+        for user in sorted(self.pm_history.keys()):
+            btn = tkButton(self.pm_list_frame, text=f"{user}", command=lambda u=user: self._switch_channel(f"@{u}"),
+                             bg="#181825", fg="#CDD6F4", relief=tk.FLAT, font=("Arial", 11),
+                             anchor="w", padx=15, pady=2, cursor="hand2")
+            btn.pack(fill=tk.X)
+            self.pm_btns[f"@{user}"] = btn
 
     def _trigger_typing(self):
         self._schedule_send({"type": "typing", "sender": self.username, "channel": self.current_channel})
 
     def _check_typing_timeouts(self):
+        if not hasattr(self, "typing_label") or not self.typing_label.winfo_exists(): return
         now = time.time()
         to_del = [u for u, ts in self.typing_users.items() if now - ts > 3]
         for u in to_del: del self.typing_users[u]
@@ -250,78 +420,342 @@ class ChatClient:
             self.typing_label.config(text="")
         self.root.after(1000, self._check_typing_timeouts)
 
-    def _append(self, sender, content, tag="", is_me=False, image=None, timestamp=None, mid=None):
-        if not hasattr(self, "chat_display"): return
-        self.chat_display.configure(state="normal")
-        
-        start_idx = self.chat_display.index(tk.INSERT)
-        ts_str = ""
-        if timestamp:
-            dt = datetime.fromtimestamp(timestamp)
-            ts_str = dt.strftime("[%H:%M] ")
-        
-        if tag == "info":
-            self.chat_display.insert(tk.END, f"\n  ─ {content} ─\n", "info")
-        else:
-            if ts_str: self.chat_display.insert(tk.END, ts_str, "timestamp")
-            
-            # Semantic 'Me' vs real name
-            display_name = "Me" if is_me else sender
-            name_tag = "sender_me" if is_me else "sender_other"
-            
-            self.chat_display.insert(tk.END, f"{display_name}: ", name_tag)
-            
-            if image:
-                img_lbl = tk.Label(self.chat_display, image=image, bg="#181825")
-                if is_me and mid:
-                    img_lbl.bind("<Button-3>", lambda e, m=mid: self._show_context_menu(e, m))
-                self.chat_display.window_create(tk.END, window=img_lbl)
-                self.chat_display.insert(tk.END, "\n")
-            else:
-                text_idx = self.chat_display.index(tk.INSERT)
-                self.chat_display.insert(tk.END, f"{content}\n", tag or "")
-                # Bind right click delete for text too
-                if is_me and mid:
-                    # We tag the specific lines for this message
-                    msg_tag = f"msg_{mid}"
-                    self.chat_display.tag_add(msg_tag, start_idx, self.chat_display.index(tk.INSERT))
-                    self.chat_display.tag_bind(msg_tag, "<Button-3>", lambda e, m=mid: self._show_context_menu(e, m))
-            
-        if mid:
-            end_idx = self.chat_display.index(tk.INSERT)
-            self.msg_widgets[mid] = (start_idx, end_idx)
-            self.msg_senders[mid] = sender
+    def _delegate_scroll(self, event):
+        if hasattr(self, "chat_display") and self.chat_display.winfo_exists():
+            if event.num == 5 or event.delta < 0:
+                self.chat_display.yview_scroll(1, "units")
+            elif event.num == 4 or event.delta > 0:
+                self.chat_display.yview_scroll(-1, "units")
 
-        self.chat_display.configure(state="disabled")
-        self.chat_display.see(tk.END)
+    def _append(self, sender, content, tag="", is_me=False, image=None, timestamp=None, mid=None, reply_to=None):
+        if not hasattr(self, "chat_display") or not self.chat_display.winfo_exists(): return
+        
+        try:
+            self.chat_display.configure(state="normal")
+            start_idx = self.chat_display.index(tk.INSERT)
+            
+            # Reply Context
+            if reply_to:
+                # Resolve the reply_to ID to actual message text
+                replied_sender = self.msg_senders.get(reply_to, "")
+                replied_text = self.msg_content_cache.get(reply_to, "")
+                if replied_text:
+                    preview = (replied_text[:45] + "...") if len(replied_text) > 45 else replied_text
+                    reply_line = f"  [ {replied_sender}: {preview} ]\n" if replied_sender else f"  [ {preview} ]\n"
+                else:
+                    reply_line = f"  [ Replying to message ]\n"
+                self.chat_display.insert(tk.END, reply_line, "reply")
+
+            ts_str = ""
+            if timestamp:
+                dt = datetime.fromtimestamp(timestamp)
+                ts_str = dt.strftime("[%H:%M] ")
+            
+            if tag == "info":
+                self.chat_display.insert(tk.END, f"\n  ─ {content} ─\n", "info")
+            else:
+                if ts_str: self.chat_display.insert(tk.END, ts_str, "timestamp")
+                
+                display_name = "Me" if is_me else sender
+                name_tag = "sender_me" if is_me else "sender_other"
+                
+                self.chat_display.insert(tk.END, f"{display_name}: ", name_tag)
+                
+                # Mention Check
+                is_mention = f"@{self.username}" in content
+                current_tag = "mention" if is_mention else (tag or "")
+
+                if image:
+                    img_lbl = tk.Label(self.chat_display, image=image, bg="#181825")
+                    img_lbl.bind("<MouseWheel>", self._delegate_scroll)
+                    img_lbl.bind("<Button-4>", self._delegate_scroll)
+                    img_lbl.bind("<Button-5>", self._delegate_scroll)
+                    
+                    for b in ["<Button-2>", "<Button-3>", "<Control-Button-1>"]:
+                        img_lbl.bind(b, lambda e, m=mid: self._show_context_menu(e, m))
+                    
+                    self.chat_display.window_create(tk.END, window=img_lbl)
+                    self.chat_display.insert(tk.END, "\n")
+                else:
+                    self._insert_markdown(content, current_tag)
+                    self.chat_display.insert(tk.END, "\n")
+                    
+                    if mid:
+                        msg_tag = f"msg_{mid}"
+                        self.chat_display.tag_add(msg_tag, start_idx, self.chat_display.index(tk.INSERT))
+                        for b in ["<Button-2>", "<Button-3>", "<Control-Button-1>"]:
+                            self.chat_display.tag_bind(msg_tag, b, lambda e, m=mid: self._show_context_menu(e, m))
+                
+            if mid:
+                end_idx = self.chat_display.index(tk.INSERT)
+                self.msg_widgets[mid] = (start_idx, end_idx)
+                self.msg_senders[mid] = sender
+                if content:
+                    self.msg_content_cache[mid] = content
+
+        finally:
+            if self.chat_display.winfo_exists():
+                self.chat_display.configure(state="disabled")
+                self.chat_display.see(tk.END)
+
+    def _insert_markdown(self, content, base_tag=""):
+        # Pattern for Bold, Italic, Code, Hyperlinks, and #Channels
+        pattern = re.compile(r'(\*\*.+?\*\*|\*.+?[\*]|`.+?`|https?://\S+|#\w+)')
+        remaining = content
+        while remaining:
+            match = pattern.search(remaining)
+            if not match:
+                self.chat_display.insert(tk.END, remaining, base_tag)
+                break
+            
+            # Text before match
+            self.chat_display.insert(tk.END, remaining[:match.start()], base_tag)
+            m = match.group(0)
+            
+            if m.startswith("**") and m.endswith("**"):
+                self.chat_display.insert(tk.END, m[2:-2], ("bold", base_tag))
+            elif m.startswith("*") and m.endswith("*"):
+                self.chat_display.insert(tk.END, m[1:-1], ("italic", base_tag))
+            elif m.startswith("`") and m.endswith("`"):
+                self.chat_display.insert(tk.END, m[1:-1], ("code", base_tag))
+            elif m.startswith("http"):
+                self.chat_display.insert(tk.END, m, ("link", base_tag))
+                # Make link clickable
+                start_idx = self.chat_display.index(f"{tk.INSERT} - {len(m)}c")
+                end_idx = self.chat_display.index(tk.INSERT)
+                self.chat_display.tag_add("clickable_link", start_idx, end_idx)
+                self.chat_display.tag_bind("clickable_link", "<Button-1>", lambda e, url=m: self._open_url(url))
+                self.chat_display.tag_config("clickable_link", foreground="#89B4FA", underline=True)
+            elif m.startswith("#"):
+                chan_name = m[1:]
+                if chan_name in CHANNELS:
+                     self.chat_display.insert(tk.END, m, ("channel_link", base_tag))
+                     start_idx = self.chat_display.index(f"{tk.INSERT} - {len(m)}c")
+                     end_idx = self.chat_display.index(tk.INSERT)
+                     tag_name = f"chan_{chan_name}_{uuid.uuid4().hex[:4]}"
+                     self.chat_display.tag_add(tag_name, start_idx, end_idx)
+                     self.chat_display.tag_bind(tag_name, "<Button-1>", lambda e, c=chan_name: self._switch_channel(c))
+                     self.chat_display.tag_config(tag_name, foreground="#A6E3A1", font=("Arial", 14, "bold"), underline=True)
+                else:
+                     self.chat_display.insert(tk.END, m, base_tag)
+            else:
+                self.chat_display.insert(tk.END, m, base_tag)
+            
+            remaining = remaining[match.end():]
+
+    def _open_url(self, url):
+        if sys.platform == "darwin": subprocess.run(["open", url])
+        elif sys.platform == "win32": os.startfile(url)
+        else: subprocess.run(["xdg-open", url])
 
     def _show_context_menu(self, event, mid):
         menu = tk.Menu(self.root, tearoff=0, bg="#313244", fg="white", activebackground="#89B4FA")
-        menu.add_command(label="🗑 Delete Message", command=lambda: self._request_delete(mid))
-        menu.post(event.x_root, event.y_root)
+        
+        is_file = mid in self.file_refs
+        sender = self.msg_senders.get(mid)
+        is_me = (sender == self.username)
+        
+        # Add React Submenu
+        react_menu = tk.Menu(menu, tearoff=0, bg="#313244", fg="white", activebackground="#89B4FA")
+        for emj in ["👍", "👎", "❤️", "😂", "🔥", "👀", "🤔", "🎉", "💀", "🤓"]:
+            react_menu.add_command(label=emj, command=lambda m=mid, e=emj: self._react_to_msg(m, e))
+        menu.add_cascade(label="Add Reaction...", menu=react_menu)
+        menu.add_separator()
+        
+        menu.add_command(label="Reply", command=lambda m=mid: self._set_reply(m))
+        if not is_me:
+            menu.add_command(label=f"Message @{sender}", command=lambda u=sender: self._switch_channel(f"@{u}"))
+
+        if is_file:
+            data = self.file_data_cache.get(mid)
+            if data:
+                ref = self.file_refs[mid]
+                menu.add_command(label="Save File", command=lambda: self._save_file(ref['filename'], data))
+        
+        if is_me:
+            menu.add_separator()
+            if not is_file:
+                menu.add_command(label="Edit Message", command=lambda m=mid: self._request_edit(m))
+            menu.add_command(label="Delete", command=lambda m=mid: self._request_delete(m), foreground="#F38BA8")
+        
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _react_to_msg(self, mid, emoji):
+        self._set_reply(mid)
+        self._send_emoji(emoji)
+
+    def _set_reply(self, mid):
+        self.reply_target = mid
+        sender = self.msg_senders.get(mid, "")
+        text = self.msg_content_cache.get(mid, "")
+        if text:
+            preview = (text[:40] + "...") if len(text) > 40 else text
+            label = f"Replying to {sender}: {preview}" if sender else f"Replying to: {preview}"
+        else:
+            label = "Replying to message"
+        self.reply_label.config(text=label)
+        self.reply_frame.pack(side=tk.BOTTOM, fill=tk.X, before=self.msg_entry.master)
+
+    def _cancel_reply(self):
+        self.reply_target = None
+        self.reply_frame.pack_forget()
 
     def _request_delete(self, mid):
         self._schedule_send({"type": "delete", "msg_id": mid})
 
+    def _request_edit(self, mid):
+        # Find current text
+        history = []
+        for c in self.channel_history.values(): history.extend(c)
+        current_text = ""
+        for m in history:
+            if m.get("msg_id") == mid:
+                current_text = m.get("content", "")
+                break
+        
+        new_text = simpledialog.askstring("Edit Message", "Update your message:", initialvalue=current_text)
+        if new_text is not None and new_text != current_text:
+            self._schedule_send({"type": "edit", "msg_id": mid, "content": new_text})
+
+    def _save_file(self, filename, data, open_after=False):
+        try:
+            if open_after:
+                # Play/open without saving to Downloads - use temp file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{filename}") as tmp:
+                    tmp.write(data)
+                    save_path = tmp.name
+
+                is_video = any(filename.lower().endswith(e) for e in [".mp4", ".mov", ".avi", ".mkv"])
+                is_audio = any(filename.lower().endswith(e) for e in [".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aiff"])
+
+                if is_audio and sys.platform == "darwin":
+                    try:
+                        self._stop_playback()
+                        self.playback_proc = subprocess.Popen(["afplay", save_path])
+                        self._setStatus(f"Playing: {filename}", "#A6E3A1")
+                        if hasattr(self, "stop_btn"): self.stop_btn.pack(side=tk.RIGHT, padx=5)
+                    except Exception as e:
+                        print(f"afplay failed: {e}")
+                elif is_video or is_audio:
+                    # Use OS default (QuickTime for video on Mac)
+                    if sys.platform == "darwin":
+                        subprocess.Popen(["open", save_path])
+                    elif sys.platform == "win32":
+                        os.startfile(save_path)
+                    else:
+                        subprocess.Popen(["xdg-open", save_path])
+                else:
+                    if sys.platform == "darwin": subprocess.run(["open", save_path])
+                    elif sys.platform == "win32": os.startfile(save_path)
+                    else: subprocess.run(["xdg-open", save_path])
+                return
+
+            # Manual save to downloads
+            downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")
+            os.makedirs(downloads_path, exist_ok=True)
+            save_path = os.path.join(downloads_path, filename)
+            base, ext = os.path.splitext(filename)
+            counter = 1
+            while os.path.exists(save_path):
+                save_path = os.path.join(downloads_path, f"{base}_{counter}{ext}")
+                counter += 1
+            with open(save_path, "wb") as f: f.write(data)
+            messagebox.showinfo("File Saved", f"Saved to:\n{save_path}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _stop_playback(self):
+        if self.playback_proc:
+            try: self.playback_proc.terminate()
+            except: pass
+            self.playback_proc = None
+        if hasattr(self, "stop_btn") and self.stop_btn.winfo_exists():
+            self.stop_btn.pack_forget()
+        self._setStatus("Connected", "#585B70")
+
+    def _show_emoji_picker(self):
+        if sys.platform == "darwin":
+            # Direct keystroke combo often fails without accessibility permissions, 
+            # so we use characters palette name
+            subprocess.run(["osascript", "-e", 'tell application "System Events" to set visible of process "ControlCenter" to false',
+                             "-e", 'tell application "System Events" to keystroke (ASCII character 32) using {control down, command down}'])
+        elif sys.platform == "win32":
+            subprocess.run(["powershell", "-c", "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^{ESC}')"])
+        else:
+            subprocess.run(["ibus", "emoji"])
+
+    def _play_sound(self, sound="Glass"):
+        if not self.settings.get("sound"): return
+        path = f"/System/Library/Sounds/{sound}.aiff"
+        if os.path.exists(path):
+            subprocess.Popen(["afplay", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _setStatus(self, text, color="#89B4FA"):
+        self.status_var.set(text)
+        if hasattr(self, "status_label") and self.status_label.winfo_exists():
+            self.status_label.configure(fg=color)
+
+    def _open_settings(self):
+        win = tk.Toplevel(self.root)
+        win.title("NAVICHUD SETTINGS")
+        win.geometry("400x450")
+        win.configure(bg="#1E1E2E")
+        
+        tk.Label(win, text="Settings", font=("Arial", 18, "bold"), bg="#1E1E2E", fg="#CDD6F4").pack(pady=20)
+        
+        # Audio/Notifications
+        for key, label in [("sound", "Sound Effects"), ("notifications", "Show Notifications")]:
+            var = tk.BooleanVar(value=self.settings.get(key, True))
+            def update(k=key, v=var): self.settings[k] = v.get()
+            tk.Checkbutton(win, text=label, variable=var, command=update,
+                           font=("Arial", 14), bg="#1E1E2E", fg="#A6ADC8", selectcolor="#313244", activebackground="#1E1E2E").pack(pady=10, anchor="w", padx=50)
+        
+        # Status
+        tk.Label(win, text="My Status", font=("Arial", 14), bg="#1E1E2E", fg="#CDD6F4").pack(pady=(20, 5))
+        status_var = tk.StringVar(value=self.current_status)
+        def change_status(val):
+            self.current_status = val
+            self._schedule_send({"type": "status_update", "sender": self.username, "status": val})
+        
+        opt = tk.OptionMenu(win, status_var, *self.user_statuses, command=change_status)
+        opt.config(bg="#313244", fg="#CDD6F4", relief=tk.FLAT, font=("Arial", 12))
+        opt.pack(pady=10)
+
+    def _logout(self):
+        self.joined = False
+        self.username = "Anonymous"
+        if os.path.exists(SESSION_FILE):
+            try: os.remove(SESSION_FILE)
+            except: pass
+        if self.ws:
+            asyncio.run_coroutine_threadsafe(self.ws.close(), self.loop)
+        self._setStatus("Logged out.", "#A6ADC8")
+        self._build_login()
+
     def _start_connect(self):
         user = self.user_var.get().strip()
         pwd  = self.pass_var.get().strip()
-        url  = self.url_var.get().strip()
-        if not user or not url: return
+        url  = self.url_var.get().strip() or self.server_url
+        if not user: return
         
-        # Hash password for transport 'encryption'
-        # In a real app we'd just use WSS, but this meets the 'encrypted in transit' req for the bits
         hashed_pwd = hashlib.sha256(pwd.encode()).hexdigest()
+        mode = self.auth_mode.get()
 
         if url != self.server_url:
+            # Different server — update and force reconnect
             self.server_url = url
-            # Update credentials for next connection
             self.username = user
             if self.ws:
                 asyncio.run_coroutine_threadsafe(self.ws.close(), self.loop)
         else:
-            mode = self.auth_mode.get()
-            self._schedule_send({"type": mode, "sender": user, "password": hashed_pwd, "sync": True})
+            # Same server — send auth directly on open connection
+            self._schedule_send({
+                "type": mode,
+                "sender": user,
+                "password": hashed_pwd,
+                "sync": self.sync_var.get(),
+                "remember": self.remember_var.get()
+            })
 
     def _flush_sync_buffer(self):
         if not hasattr(self, "chat_display"): return
@@ -337,16 +771,43 @@ class ChatClient:
             try:
                 self.loop.run_until_complete(self._connect())
             except Exception as e:
-                print(f"Connection lost: {e}. Retrying in 5s...")
+                err_msg = f"Connection lost. Retrying in 5s... ({e})"
+                print(err_msg)
+                self._setStatus(err_msg, "#F38BA8")
                 time.sleep(5)
 
     async def _connect(self):
-        async with websockets.connect(self.server_url) as ws:
-            self.ws = ws
-            if self.sync_requested:
-                self.is_syncing = True
-            await ws.send(json.dumps({"type": "join", "sender": self.username, "sync": self.sync_requested}))
-            await self._receive_loop(ws)
+        self._setStatus(f"Connecting to {self.server_url}...", "#89B4FA")
+        try:
+            async with websockets.connect(self.server_url, max_size=104857600,
+                                          ping_interval=30, ping_timeout=60) as ws:
+                self.ws = ws
+                
+                # Session token auto-login
+                if os.path.exists(SESSION_FILE):
+                    try:
+                        with open(SESSION_FILE, "r") as f:
+                            token = f.read().strip()
+                        if token:
+                            self._setStatus("Restoring session...", "#A6ADC8")
+                            await ws.send(json.dumps({
+                                "type": "token_login",
+                                "token": token,
+                                "sync": True,
+                                "remember": True
+                            }))
+                            await self._receive_loop(ws)
+                            return  # handled entirely by receive_loop
+                    except Exception as e:
+                        print(f"Token login error: {e}")
+                        try: os.remove(SESSION_FILE)
+                        except: pass
+
+                # No session file or token login failed — wait for user to hit JOIN in the UI
+                self._setStatus("Connected. Please log in.", "#585B70")
+                await self._receive_loop(ws)
+        except Exception as e:
+            raise  # Let _run_loop handle reconnect
 
     async def _receive_loop(self, ws):
         async for raw in ws:
@@ -356,23 +817,66 @@ class ChatClient:
     def _handle_incoming(self, msg, is_replay=False):
         t = msg.get("type", "text")
         
+        if t == "user_list":
+            self.online_users = msg.get("users", {})
+            self._update_user_list_ui()  # guarded inside with hasattr check
+            count = len(self.online_users)
+            if self.joined:
+                self._setStatus(f"Logged in as {self.username} ({count} Online)", "#A6E3A1")
+            return
+
+        if t == "pm":
+            sender = msg.get("sender")
+            content = msg.get("content")
+            other = sender if sender != self.username else msg.get("target")
+            
+            if other not in self.pm_history:
+                self.pm_history[other] = []
+                self._update_pm_list_ui()
+            
+            if not any(m.get("msg_id") == msg.get("msg_id") for m in self.pm_history[other]):
+                self.pm_history[other].append(msg)
+            
+            if not is_replay and sender != self.username:
+                self._play_sound("Ping")
+            
+            if self.current_channel == f"@{other}":
+                self._append(sender, content, is_me=(sender == self.username), mid=msg.get("msg_id"), timestamp=msg.get("timestamp"), reply_to=msg.get("reply_to"))
+            return
+
         if t == "sync_finished":
             self.is_syncing = False
-            if self.joined:
-                self._flush_sync_buffer()
+            count = len(self.online_users)
+            self._setStatus(f"Logged in as {self.username} ({count} Online)", "#A6E3A1")
+            if self.joined and hasattr(self, "chat_display"):
+                self._switch_channel(self.current_channel, force=True)
             return
         
         if t == "auth_success":
             user = msg.get("username", "Anonymous")
+            token = msg.get("token")
+            if token:
+                try:
+                    with open(SESSION_FILE, "w") as f: f.write(token)
+                except: pass
+
+            self._setStatus(f"Logged in as {user}", "#A6E3A1")
             if user != "Anonymous":
                 self.username = user
+                already_joined = self.joined
                 self.joined = True
-                self._build_chat_ui()
-                self._flush_sync_buffer()
+                if not already_joined:
+                    self.is_syncing = True  # history is incoming after auth
+                    self._build_chat_ui()
+                    # Defer flush until sync_finished arrives
             return
         
         if t == "auth_error":
-            messagebox.showerror("Auth Error", msg.get("content", "Error"))
+            # If session was rejected, clean up
+            if os.path.exists(SESSION_FILE):
+                try: os.remove(SESSION_FILE)
+                except: pass
+            self._setStatus(msg.get("content", "Error"), "#F38BA8")
             self.joined = False
             self._build_login() 
             return
@@ -380,11 +884,57 @@ class ChatClient:
         if t == "delete_notify":
             mid = msg.get("msg_id")
             if mid in self.msg_widgets:
+                if hasattr(self, "chat_display") and self.chat_display.winfo_exists():
+                    start, end = self.msg_widgets[mid]
+                    try:
+                        self.chat_display.configure(state="normal")
+                        self.chat_display.delete(start, end)
+                        self.chat_display.insert(start, " (( message deleted )) \n", "info")
+                    finally:
+                        self.chat_display.configure(state="disabled")
+            
+            # Update local history
+            for cname in self.channel_history:
+                self.channel_history[cname] = [m for m in self.channel_history[cname] if (m.get("msg_id") or m.get("file_id")) != mid]
+            return
+
+        if t == "edit_notify":
+            mid = msg.get("msg_id")
+            new_val = msg.get("content")
+            if mid in self.msg_widgets and hasattr(self, "chat_display") and self.chat_display.winfo_exists():
                 start, end = self.msg_widgets[mid]
-                self.chat_display.configure(state="normal")
-                self.chat_display.delete(start, end)
-                self.chat_display.insert(start, " (( message deleted )) \n", "info")
-                self.chat_display.configure(state="disabled")
+                sender = self.msg_senders.get(mid, "?")
+                is_me = (sender == self.username)
+                try:
+                    self.chat_display.configure(state="normal")
+                    self.chat_display.delete(start, end)
+                    # Re-insert with markdown
+                    self.chat_display.mark_set("insert", start)
+                    
+                    # Redo the prefix (timestamp + name)
+                    # To keep it simple, we use a slightly simplified re-insert for edits
+                    display_name = "Me" if is_me else sender
+                    name_tag = "sender_me" if is_me else "sender_other"
+                    self.chat_display.insert(start, f"{display_name}: ", name_tag)
+                    self._insert_markdown(new_val)
+                    self.chat_display.insert(tk.INSERT, " (edited)\n", "info")
+                    
+                    # Update widget mapping end point
+                    new_end = self.chat_display.index(tk.INSERT)
+                    self.msg_widgets[mid] = (start, new_end)
+                    
+                    # Re-bind tag if it was text
+                    msg_tag = f"msg_{mid}"
+                    self.chat_display.tag_add(msg_tag, start, new_end)
+                    for b in ["<Button-2>", "<Button-3>", "<Control-Button-1>"]:
+                        self.chat_display.tag_bind(msg_tag, b, lambda e, m=mid: self._show_context_menu(e, m))
+                finally:
+                    self.chat_display.configure(state="disabled")
+            
+            # Update local history
+            for cname in self.channel_history:
+                for m in self.channel_history[cname]:
+                    if m.get("msg_id") == mid: m["content"] = new_val
             return
 
         sender = msg.get("sender", "?")
@@ -422,11 +972,16 @@ class ChatClient:
 
         if channel != self.current_channel and t != "info": return
 
+        # Chud Killswitch hiding
+        if self.chud_disabled_var.get() and sender == "Chudbot" and t in ("text", "emoji", "pm", "file_ref", "file_data"):
+            return
+
         if t == "text":
-            self._append(sender, msg.get("content", ""), mid=mid, is_me=is_me, timestamp=ts)
+            if not is_replay and f"@{self.username}" in msg.get("content", ""):
+                 self._play_sound("Basso") # Special mention sound
+            self._append(sender, msg.get("content", ""), mid=mid, is_me=is_me, timestamp=ts, reply_to=msg.get("reply_to"))
         elif t == "emoji":
-            # Show big emoji
-            self._append(sender, msg.get("content", ""), "emoji_big", mid=mid, is_me=is_me, timestamp=ts)
+            self._append(sender, msg.get("content", ""), mid=mid, is_me=is_me, timestamp=ts, reply_to=msg.get("reply_to"))
         elif t == "info":
             self._append(sender, msg.get("content", ""), "info", timestamp=ts)
         elif t == "file_ref":
@@ -439,15 +994,26 @@ class ChatClient:
             self.file_data_received.add(fid)
             ref = self.file_refs.get(fid, {})
             mime = msg.get("mime", ref.get("mime", ""))
+            filename = msg.get("filename", ref.get("filename", "file"))
             data = base64.b64decode(msg.get("data", ""))
+            self.file_data_cache[fid] = data # Cache for right-click save
             
             if mime.startswith("image/"):
+                if not (hasattr(self, "chat_display") and self.chat_display.winfo_exists()): return
                 label = tk.Label(self.chat_display, bg="#181825")
-                self._append(sender, "", is_me=is_me, timestamp=ts)
-                self.chat_display.configure(state="normal")
-                self.chat_display.window_create(tk.END, window=label)
-                self.chat_display.insert(tk.END, "\n")
-                self.chat_display.configure(state="disabled")
+                # Fix scroll interception
+                label.bind("<MouseWheel>", self._delegate_scroll)
+                label.bind("<Button-4>", self._delegate_scroll)
+                label.bind("<Button-5>", self._delegate_scroll)
+                
+                self._append(sender, "", is_me=is_me, timestamp=ts, mid=fid)
+                try:
+                    self.chat_display.configure(state="normal")
+                    self.chat_display.window_create(tk.END, window=label)
+                    self.chat_display.insert(tk.END, "\n")
+                finally:
+                    if self.chat_display.winfo_exists():
+                        self.chat_display.configure(state="disabled")
                 
                 if mime == "image/gif":
                     anim = AnimatedImage(label, data, self.chat_display)
@@ -458,43 +1024,159 @@ class ChatClient:
                     tk_img = ImageTk.PhotoImage(img)
                     self.images.append(tk_img)
                     label.config(image=tk_img)
+            elif mime.startswith("audio/") or mime.startswith("video/") or any(filename.lower().endswith(ext) for ext in [".mp3", ".wav", ".mp4", ".mov", ".m4a"]):
+                is_video = mime.startswith("video/") or any(filename.lower().endswith(e) for e in [".mp4", ".mov"])
+                mtype = "Video" if is_video else "Audio"
+                btn_text = f"PLAY {mtype}: {filename}"
+
+                def _render_video(d=data, fname=filename, f_id=fid, s=sender, me=is_me, t_s=ts, do_thumb=not is_replay):
+                    thumb_img = None
+                    expected_channel = self.current_channel
+                    if do_thumb:
+                        try:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{fname}") as tmp:
+                                tmp.write(d)
+                                tmp_path = tmp.name
+                            thumb_path = tmp_path + "_thumb.jpg"
+                            result = subprocess.run(
+                                ["ffmpeg", "-y", "-i", tmp_path, "-ss", "00:00:00", "-vframes", "1", thumb_path],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8
+                            )
+                            if result.returncode == 0 and os.path.exists(thumb_path):
+                                img = Image.open(thumb_path)
+                                img.thumbnail((400, 225))
+                                thumb_img = ImageTk.PhotoImage(img)
+                                os.unlink(thumb_path)
+                            os.unlink(tmp_path)
+                        except Exception as e:
+                            print(f"Thumb error: {e}")
+
+                    def _display_in_ui():
+                        if self.current_channel != expected_channel:
+                            return  # User switched away, discard thumb/text to prevent bleeding
+                        
+                        self._append(s, "", is_me=me, timestamp=t_s, mid=f_id)
+                        if not (hasattr(self, "chat_display") and self.chat_display.winfo_exists()): return
+                        try:
+                            self.chat_display.configure(state="normal")
+                            if thumb_img:
+                                lbl = tk.Label(self.chat_display, image=thumb_img, bg="#181825",
+                                               cursor="hand2", relief=tk.FLAT)
+                                lbl.image = thumb_img  # keep reference
+                                lbl.bind("<Button-1>", lambda e, dd=d, fn=fname: self._save_file(fn, dd, open_after=True))
+                                lbl.bind("<MouseWheel>", self._delegate_scroll)
+                                self.chat_display.window_create(tk.END, window=lbl)
+                                self.chat_display.insert(tk.END, "\n")
+                                self.images.append(thumb_img)
+                            btn = tkButton(self.chat_display, text=btn_text,
+                                            command=lambda dd=d, fn=fname: self._save_file(fn, dd, open_after=True),
+                                            bg="#313244", fg="#A6E3A1", font=("Arial", 12, "bold"),
+                                            relief=tk.FLAT, cursor="hand2", padx=15, pady=5)
+                            btn.bind("<MouseWheel>", self._delegate_scroll)
+                            for b in ["<Button-2>", "<Button-3>", "<Control-Button-1>"]:
+                                btn.bind(b, lambda e, fi=f_id: self._show_context_menu(e, fi))
+                            self.chat_display.window_create(tk.END, window=btn)
+                            self.chat_display.insert(tk.END, "\n")
+                        finally:
+                            if self.chat_display.winfo_exists():
+                                self.chat_display.configure(state="disabled")
+                                self.chat_display.see(tk.END)
+
+                    if not do_thumb:
+                        _display_in_ui()
+                    else:
+                        self.root.after(0, _display_in_ui)
+
+                if is_replay:
+                    _render_video() # Sync so it's inline in history
+                else:
+                    threading.Thread(target=_render_video, daemon=True).start()
             else:
-                self._append(sender, f"📎 {msg.get('filename','file')}", "file", is_me=is_me, timestamp=ts)
+                placeholder = f"[Preview unsupported, right-click to download: {filename}]"
+                self._append(sender, placeholder, "info", is_me=is_me, timestamp=ts, mid=fid)
+                # Binding to the mid in _append handles the context menu
 
     def _schedule_send(self, payload: dict):
         if self.ws and self.loop:
             asyncio.run_coroutine_threadsafe(self.ws.send(json.dumps(payload)), self.loop)
 
     def _send_text(self):
-        text = self.msg_var.get().strip()
-        if not text: return
+        val = self.msg_entry.get("1.0", tk.END).strip()
+        if not val: return
+        
         mid = uuid.uuid4().hex[:12]
+        payload = {
+            "type": "text", "sender": self.username,
+            "content": val, "channel": self.current_channel,
+            "reply_to": self.reply_target, "msg_id": mid,
+            "timestamp": time.time()
+        }
+        
+        if self.current_pm_target:
+            payload["type"] = "pm"
+            payload["target"] = self.current_pm_target
+            if self.current_pm_target not in self.pm_history:
+                self.pm_history[self.current_pm_target] = []
+                self._update_pm_list_ui()
+            self.pm_history[self.current_pm_target].append(payload)
+        else:
+            self.channel_history[self.current_channel].append(payload)
+        
         self.seen_msg_ids.add(mid)
-        msg = {"type": "text", "sender": self.username, "content": text, "channel": self.current_channel, "msg_id": mid}
-        self._schedule_send(msg)
-        self.channel_history[self.current_channel].append(msg) # Added to history
-        self._append("Me", text, is_me=True, timestamp=time.time())
-        self.msg_var.set("")
+        self._schedule_send(payload)
+        self._append(self.username, val, is_me=True, mid=mid, timestamp=payload["timestamp"], reply_to=self.reply_target)
+        
+        self.msg_entry.delete("1.0", tk.END)
+        self._cancel_reply()
 
     def _send_emoji(self, emoji: str):
         mid = uuid.uuid4().hex[:12]
+        payload = {
+            "type": "emoji", "sender": self.username,
+            "content": emoji, "channel": self.current_channel,
+            "reply_to": self.reply_target, "msg_id": mid,
+            "timestamp": time.time()
+        }
+        
+        if self.current_pm_target:
+            payload["type"] = "pm"
+            payload["target"] = self.current_pm_target
+            if self.current_pm_target not in self.pm_history:
+                self.pm_history[self.current_pm_target] = []
+                self._update_pm_list_ui()
+            self.pm_history[self.current_pm_target].append(payload)
+        else:
+            self.channel_history[self.current_channel].append(payload)
+            
         self.seen_msg_ids.add(mid)
-        msg = {"type": "emoji", "sender": self.username, "content": emoji, "channel": self.current_channel, "msg_id": mid}
-        self._schedule_send(msg)
-        self.channel_history[self.current_channel].append(msg) # Added to history
-        self._append("Me", emoji, "emoji_big", is_me=True, timestamp=time.time())
+        self._schedule_send(payload)
+        self._append(self.username, emoji, is_me=True, mid=mid, timestamp=payload["timestamp"], reply_to=self.reply_target)
+        self._cancel_reply()
 
     def _send_file(self):
         path = filedialog.askopenfilename()
         if not path: return
+        # Limit at 50MB
+        if os.path.getsize(path) > 50 * 1024 * 1024:
+            messagebox.showerror("File Too Large", "Maximum upload size is 50MB.")
+            return
+            
         filename = os.path.basename(path)
-        with open(path, "rb") as f:
-            data_b64 = base64.b64encode(f.read()).decode("ascii")
-        self._schedule_send({
-            "type": "file", "sender": self.username, "filename": filename,
-            "mime": mimetypes.guess_type(path)[0] or "application/octet-stream",
-            "data": data_b64, "channel": self.current_channel
-        })
+        self._setStatus(f"UPLOADING: {filename}...", "#F9E2AF")
+        self.root.update_idletasks() # Force UI paint before thread lock
+        
+        def _upload():
+            with open(path, "rb") as f:
+                data_b64 = base64.b64encode(f.read()).decode("ascii")
+            self._schedule_send({
+                "type": "file", "sender": self.username, "filename": filename,
+                "mime": mimetypes.guess_type(path)[0] or "application/octet-stream",
+                "data": data_b64, "channel": self.current_channel
+            })
+            # Update status back to connected on the main thread after upload is done
+            self.root.after(0, lambda: self._setStatus("Connected", "#585B70"))
+        
+        threading.Thread(target=_upload, daemon=True).start()
 
     def run(self): self.root.mainloop()
 
