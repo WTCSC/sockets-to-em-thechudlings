@@ -532,11 +532,78 @@ class ChatClient:
             if user == self.username: continue
             if self.chud_disabled_var.get() and user == "Chudbot": continue
             color = "#A6E3A1" if status=="Online" else "#F9E2AF" if status=="Away" else "#F38BA8"
-            btn = tkButton(self.user_list_frame, text=f"{user} ({status})", command=lambda u=user: self._switch_channel(f"@{u}"),
+            
+            # Create user row frame
+            user_row = tk.Frame(self.user_list_frame, bg="#181825")
+            user_row.pack(fill=tk.X, pady=2)
+            
+            # Profile picture (30x30)
+            pic_label = tk.Label(user_row, bg="#181825", width=4, height=2)
+            pic_label.pack(side=tk.LEFT, padx=(15, 5))
+            self._load_profile_pic(user, pic_label)
+            
+            # Username and status
+            btn = tkButton(user_row, text=f"{user} ({status})", command=lambda u=user: self._switch_channel(f"@{u}"),
                             bg="#181825", fg=color, relief=tk.FLAT, font=("Arial", 11),
-                            anchor="w", padx=15, pady=2, cursor="hand2")
-            btn.pack(fill=tk.X)
+                            anchor="w", padx=5, pady=2, cursor="hand2")
+            btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            
+            # Profile button
+            profile_btn = tkButton(user_row, text="👤", command=lambda u=user: self._view_profile(u),
+                                 bg="#313244", fg="#CDD6F4", relief=tk.FLAT, font=("Arial", 10, "bold"),
+                                 cursor="hand2", padx=5, pady=2)
+            profile_btn.pack(side=tk.RIGHT, padx=(0, 10))
+            
             self.user_btns[f"@{user}"] = btn
+
+    def _load_profile_pic(self, username, label):
+        # Load from cache if available
+        if username in self.user_profile_pics:
+            label.config(image=self.user_profile_pics[username])
+            return
+        
+        # Fallback to initials
+        initials = (username[:2].upper() if username else "??")
+        label.config(text=initials, font=("Arial", 10, "bold"))
+
+    def _view_profile(self, username):
+        """Open a profile view window for the specified user."""
+        win = tk.Toplevel(self.root)
+        win.title(f"{username}'s Profile")
+        win.geometry("400x300")
+        win.configure(bg=THEMES[self.current_theme]["bg_primary"])
+
+        # Profile picture
+        pic_frame = tk.Frame(win, bg=THEMES[self.current_theme]["bg_primary"])
+        pic_frame.pack(pady=20)
+        
+        pic_label = tk.Label(pic_frame, bg=THEMES[self.current_theme]["bg_primary"], width=10, height=5)
+        pic_label.pack()
+        
+        if username in self.user_profile_pics:
+            pic_label.config(image=self.user_profile_pics[username])
+        else:
+            initials = username[:2].upper() if username else "??"
+            pic_label.config(text=initials, font=(THEMES[self.current_theme]["font_family"], 20, "bold"))
+
+        # User info
+        info_frame = tk.Frame(win, bg=THEMES[self.current_theme]["bg_primary"])
+        info_frame.pack(fill=tk.X, padx=20)
+
+        tk.Label(info_frame, text=f"Username: {username}", font=(THEMES[self.current_theme]["font_family"], 14), 
+                 bg=THEMES[self.current_theme]["bg_primary"], fg=THEMES[self.current_theme]["fg_primary"]).pack(anchor="w")
+        
+        status = self.online_users.get(username, "Unknown")
+        tk.Label(info_frame, text=f"Status: {status}", font=(THEMES[self.current_theme]["font_family"], 14), 
+                 bg=THEMES[self.current_theme]["bg_primary"], fg=THEMES[self.current_theme]["fg_primary"]).pack(anchor="w", pady=(5, 0))
+
+        # Get user description and mood from server
+        self._schedule_send({"type": "get_profile", "username": username})
+        
+        # Close button
+        tkButton(win, text="Close", command=win.destroy, bg=THEMES[self.current_theme]["btn_primary"], 
+                 fg=THEMES[self.current_theme]["bg_primary"], font=(THEMES[self.current_theme]["font_family"], 12, "bold"), 
+                 relief=tk.FLAT, cursor="hand2", padx=20, pady=10).pack(pady=20)
 
     def _update_pm_list_ui(self):
         if not hasattr(self, "pm_list_frame") or not self.pm_list_frame.winfo_exists(): return
