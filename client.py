@@ -115,6 +115,13 @@ class ChatClient:
         self.current_status = "Online"
         self.chud_disabled_var = tk.BooleanVar(value=False)
 
+        # Profile data
+        self.user_profile_pics = {} # username: ImageTk.PhotoImage
+        self.user_profile_ids = {} # username: file_id
+        self.profile_pic_id = None
+        self.user_description = ""
+        self.user_mood = ""
+
         # Start background connection immediately
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self._run_loop, daemon=True).start()
@@ -262,7 +269,10 @@ class ChatClient:
         header = tk.Frame(sidebar, bg="#181825")
         header.pack(fill=tk.X, pady=(15, 5))
         tk.Label(header, text="NAVICHUD", font=("Arial", 14, "bold"), fg="#89B4FA", bg="#181825").pack(side=tk.LEFT, padx=15)
-        tkButton(header, text="OPTIONS", command=self._open_settings, 
+        self.profile_label = tk.Label(header, bg="#181825")
+        self.profile_label.pack(side=tk.LEFT, padx=5)
+        tkButton(header, text="PROFILE", command=self._open_profile, bg="#313244", fg="#CDD6F4", relief=tk.FLAT, font=("Arial", 9, "bold"), cursor="hand2").pack(side=tk.RIGHT, padx=10)
+        tkButton(header, text="OPTIONS", command=self._open_settings,
                   bg="#313244", fg="#CDD6F4", relief=tk.FLAT, font=("Arial", 9, "bold"), cursor="hand2").pack(side=tk.RIGHT, padx=10)
 
         tk.Label(sidebar, text="CHANNELS", font=("Arial", 10, "bold"), fg="#585B70", bg="#181825", anchor="w").pack(fill=tk.X, padx=15, pady=(10, 5))
@@ -314,9 +324,9 @@ class ChatClient:
         self.chat_display.tag_config("sender_other", foreground="#A6E3A1", font=("Arial", 14, "bold"))
         self.chat_display.tag_config("mention", background="#FAB387", foreground="#1E1E2E", font=("Arial", 14, "bold"))
         self.chat_display.tag_config("reply", foreground="#585B70", font=("Arial", 12, "italic"))
-        self.chat_display.tag_config("file", foreground="#F38BA8")
+            self.chat_display.tag_config("file", foreground="#F38BA8")
         # Tags
-        
+
         # Markdown tags
         self.chat_display.tag_config("bold", font=("Arial", 14, "bold"))
         self.chat_display.tag_config("italic", font=("Arial", 14, "italic"))
@@ -487,10 +497,16 @@ class ChatClient:
                 self.chat_display.insert(tk.END, f"\n  ─ {content} ─\n", "info")
             else:
                 if ts_str: self.chat_display.insert(tk.END, ts_str, "timestamp")
-                
+
+                if sender in self.user_profile_pics:
+                    pic_label = tk.Label(self.chat_display, image=self.user_profile_pics[sender], bg="#181825")
+                    pic_label.bind("<MouseWheel>", self._delegate_scroll)
+                    self.chat_display.window_create(tk.END, window=pic_label)
+                    self.chat_display.insert(tk.END, " ")
+
                 display_name = "Me" if is_me else sender
                 name_tag = "sender_me" if is_me else "sender_other"
-                
+
                 self.chat_display.insert(tk.END, f"{display_name}: ", name_tag)
                 
                 # Mention Check
@@ -727,6 +743,34 @@ class ChatClient:
         if hasattr(self, "status_label") and self.status_label.winfo_exists():
             self.status_label.configure(fg=color)
 
+    def _open_profile(self):
+        win = tk.Toplevel(self.root)
+        win.title("Profile")
+        win.geometry("400x300")
+        win.configure(bg="#1E1E2E")
+
+        tk.Label(win, text="Description", font=("Arial", 14), bg="#1E1E2E", fg="#CDD6F4").pack(pady=(20, 5))
+
+        desc_var = tk.StringVar(value=self.user_description)
+        desc_entry = tk.Entry(win, textvariable=desc_var, font=("Arial", 14), bg="#313244", fg="#CDD6F4", insertbackground="white", relief=tk.FLAT)
+        desc_entry.pack(fill=tk.X, padx=20, pady=(0, 10))
+
+        tk.Label(win, text="Mood Emoji", font=("Arial", 14), bg="#1E1E2E", fg="#CDD6F4").pack(pady=(10, 5))
+
+        mood_var = tk.StringVar(value=self.user_mood)
+        mood_entry = tk.Entry(win, textvariable=mood_var, font=("Arial", 14), bg="#313244", fg="#CDD6F4", insertbackground="white", relief=tk.FLAT)
+        mood_entry.pack(fill=tk.X, padx=20, pady=(0, 20))
+
+        def save():
+            desc = desc_var.get()
+            mood = mood_var.get()
+            self._schedule_send({"type": "update_profile", "description": desc, "mood_emoji": mood})
+            self.user_description = desc
+            self.user_mood = mood
+            win.destroy()
+
+        tkButton(win, text="SAVE", command=save, bg="#89B4FA", fg="#1E1E2E", font=("Arial", 12, "bold"), relief=tk.FLAT, cursor="hand2", padx=20, pady=10).pack()
+
     def _open_settings(self):
         win = tk.Toplevel(self.root)
         win.title("NAVICHUD SETTINGS")
@@ -866,7 +910,12 @@ class ChatClient:
         t = msg.get("type", "text")
         
         if t == "user_list":
-            self.online_users = msg.get("users", {})
+            users_dict = msg.get("users", {})
+            self.online_users = {u: info.get("status", "Online") for u, info in users_dict.items()}
+            self.user_profile_ids = {u: info.get("profile_pic") for u, info in users_dict.items() if info.get("profile_pic")}
+            for u, fid in self.user_profile_ids.items():
+                if fid and u not in self.user_profile_pics:
+                    self._schedule_send({"type": "file_request", "file_id": fid})
             self._update_user_list_ui()  # guarded inside with hasattr check
             count = len(self.online_users)
             if self.joined:
@@ -911,6 +960,11 @@ class ChatClient:
             self._setStatus(f"Logged in as {user}", "#A6E3A1")
             if user != "Anonymous":
                 self.username = user
+                self.profile_pic_id = msg.get("profile_pic")
+                self.user_description = msg.get("description", "")
+                self.user_mood = msg.get("mood_emoji", "")
+                if self.profile_pic_id:
+                    self._schedule_send({"type": "file_request", "file_id": self.profile_pic_id})
                 already_joined = self.joined
                 self.joined = True
                 if not already_joined:
@@ -1045,7 +1099,28 @@ class ChatClient:
             filename = msg.get("filename", ref.get("filename", "file"))
             data = base64.b64decode(msg.get("data", ""))
             self.file_data_cache[fid] = data # Cache for right-click save
-            
+
+            # Check if it's a profile pic
+            if fid in self.user_profile_ids.values() or fid == self.profile_pic_id:
+                try:
+                    img = Image.open(io.BytesIO(data))
+                    img.thumbnail((32, 32))
+                    tk_img = ImageTk.PhotoImage(img)
+                    username = None
+                    if fid == self.profile_pic_id:
+                        username = self.username
+                    else:
+                        for u, id in self.user_profile_ids.items():
+                            if id == fid:
+                                username = u
+                                break
+                    if username:
+                        self.user_profile_pics[username] = tk_img
+                        if username == self.username and hasattr(self, "profile_label"):
+                            self.profile_label.config(image=tk_img)
+                except Exception as e:
+                    print(f"Profile pic error: {e}")
+
             if mime.startswith("image/"):
                 if not (hasattr(self, "chat_display") and self.chat_display.winfo_exists()): return
                 label = tk.Label(self.chat_display, bg="#181825")

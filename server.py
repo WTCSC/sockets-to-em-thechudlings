@@ -171,7 +171,11 @@ async def broadcast_users():
     for info in connected.values():
         u = info.get("username")
         if u and u != "Anonymous":
-            users[u] = info.get("status", "Online")
+            user_data = users_db.get(u, {})
+            users[u] = {
+                "status": info.get("status", "Online"),
+                "profile_pic": user_data.get("profile_pic")
+            }
     await broadcast({"type": "user_list", "users": users}, store_history=False)
 
 
@@ -222,7 +226,7 @@ async def handler(ws):
                     await ws.send(json.dumps({"type": "auth_error", "content": "Username taken"}))
                 else:
                     salt, phash = hash_pass(password)
-                    user_data = {"salt": salt, "hash": phash}
+                    user_data = {"salt": salt, "hash": phash, "description": "", "mood_emoji": ""}
                     # Handle profile picture if provided
                     profile_pic_data = msg.get("profile_pic_data")
                     profile_pic_filename = msg.get("profile_pic_filename")
@@ -230,11 +234,11 @@ async def handler(ws):
                         try:
                             # Save profile picture to uploads directory
                             pic_id = uuid.uuid4().hex[:10]
-                            pic_filename = f"profile_{pic_id}_{profile_pic_filename}"
+                            pic_filename = f"{pic_id}_{profile_pic_filename}"
                             pic_path = os.path.join(UPLOADS_DIR, pic_filename)
                             with open(pic_path, "wb") as f:
                                 f.write(base64.b64decode(profile_pic_data))
-                            user_data["profile_pic"] = pic_filename
+                            user_data["profile_pic"] = pic_id
                         except Exception as e:
                             print(f"Failed to save profile picture: {e}")
                             # Continue without profile picture
@@ -276,8 +280,16 @@ async def handler(ws):
         sync_requested  = msg.get("sync", False)
         connected[ws] = {"username": username, "channel": "General", "status": "Online"}
         print(f"+ {username} connected  (total: {len(connected)})")
-        
-        await ws.send(json.dumps({"type": "auth_success", "username": username, "token": new_token}))
+
+        user_data = users_db.get(username, {})
+        await ws.send(json.dumps({
+            "type": "auth_success",
+            "username": username,
+            "token": new_token,
+            "profile_pic": user_data.get("profile_pic"),
+            "description": user_data.get("description", ""),
+            "mood_emoji": user_data.get("mood_emoji", "")
+        }))
         await broadcast_users()
 
         # Replay history if asked
@@ -503,6 +515,14 @@ async def handler(ws):
                 if ws in connected:
                     connected[ws]["status"] = new_status
                     await broadcast_users()
+
+            elif msg_type == "update_profile":
+                desc = msg.get("description", "")
+                mood = msg.get("mood_emoji", "")
+                if username in users_db:
+                    users_db[username]["description"] = desc
+                    users_db[username]["mood_emoji"] = mood
+                    save_users()
 
             elif msg_type == "pm":
                 # PMs are handled by broadcast function's internal logic
