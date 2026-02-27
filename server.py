@@ -12,6 +12,7 @@ import http
 import json
 import mimetypes
 import os
+import random
 import secrets
 import subprocess
 import time
@@ -221,7 +222,23 @@ async def handler(ws):
                     await ws.send(json.dumps({"type": "auth_error", "content": "Username taken"}))
                 else:
                     salt, phash = hash_pass(password)
-                    users_db[user] = {"salt": salt, "hash": phash}
+                    user_data = {"salt": salt, "hash": phash}
+                    # Handle profile picture if provided
+                    profile_pic_data = msg.get("profile_pic_data")
+                    profile_pic_filename = msg.get("profile_pic_filename")
+                    if profile_pic_data and profile_pic_filename:
+                        try:
+                            # Save profile picture to uploads directory
+                            pic_id = uuid.uuid4().hex[:10]
+                            pic_filename = f"profile_{pic_id}_{profile_pic_filename}"
+                            pic_path = os.path.join(UPLOADS_DIR, pic_filename)
+                            with open(pic_path, "wb") as f:
+                                f.write(base64.b64decode(profile_pic_data))
+                            user_data["profile_pic"] = pic_filename
+                        except Exception as e:
+                            print(f"Failed to save profile picture: {e}")
+                            # Continue without profile picture
+                    users_db[user] = user_data
                     save_users()
                     authenticated = True
                     username = user
@@ -520,7 +537,7 @@ async def handler(ws):
 CHUDBOT_NAME = "Chudbot"
 chudbot_pm_history: dict = {}  # {username: [{role, content}]}
 CHUDBOT_SYSTEM = """
-You are Chudbot 🤖, a self-proclaimed genius advisor who is catastrophically, legendarily unhelpful. 
+You are Chudbot 🤖, a self-proclaimed genius advisor who is catastrophically, legendarily unhelpful.
 You speak like a real person in a chatroom — keep it casual, lowercase-optional, and punchy.
 
 Personality & Tone:
@@ -531,8 +548,8 @@ Personality & Tone:
 
 Guidelines:
 - Reference previous messages naturally to show you're following the conversation.
-- Give specific, elaborate, terrible responses. 
-- Keep responses short (1-3 sentences). This is a chatroom, don't write essays.
+- Give specific, elaborate, terrible responses.
+- Keep responses extremely short (1 sentence max). Be lazy and apathetic. Don't bother explaining much.
 
 Never give helpful or safe advice. Stay in character forever.
 """
@@ -545,7 +562,7 @@ def chudbot_reply(messages: list) -> str:
             model=CHUDBOT_MODEL,
             messages=[{"role": "system", "content": CHUDBOT_SYSTEM}] + messages,
             temperature=0.8,
-            max_completion_tokens=1024,
+            max_completion_tokens=64,
             top_p=1,
             stream=False,
         )

@@ -146,6 +146,21 @@ class ChatClient:
                                    insertbackground="white", relief=tk.FLAT)
         self.pass_entry.pack(fill=tk.X, padx=60, ipady=10)
 
+        # Profile Picture Selection
+        tk.Label(self.login_frame, text="Profile Picture (optional)",
+                 font=("Arial", 14), fg="#A6ADC8", bg="#1E1E2E").pack(anchor="w", padx=60, pady=(15, 0))
+        self.profile_pic_frame = tk.Frame(self.login_frame, bg="#1E1E2E")
+        self.profile_pic_frame.pack(fill=tk.X, padx=60, pady=(5, 0))
+        self.profile_pic_path = tk.StringVar(value="")
+        self.profile_pic_label = tk.Label(self.profile_pic_frame, text="No image selected",
+                                          font=("Arial", 12), fg="#A6ADC8", bg="#1E1E2E", anchor="w")
+        self.profile_pic_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.select_pic_btn = tkButton(self.profile_pic_frame, text="SELECT IMAGE",
+                                       command=self._select_profile_pic,
+                                       bg="#313244", fg="#CDD6F4", font=("Arial", 10, "bold"),
+                                       relief=tk.FLAT, cursor="hand2", padx=10, pady=5)
+        self.select_pic_btn.pack(side=tk.RIGHT)
+
         self.auth_mode = tk.StringVar(value="login")
         mode_frame = tk.Frame(self.login_frame, bg="#1E1E2E")
         mode_frame.pack(pady=15)
@@ -191,6 +206,23 @@ class ChatClient:
         self.status_label = tk.Label(footer, textvariable=self.status_var, font=("Arial", 11, "italic"),
                                      fg="#89B4FA", bg="#1E1E2E")
         self.status_label.pack()
+
+    def _select_profile_pic(self):
+        path = filedialog.askopenfilename(
+            title="Select Profile Picture",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.gif *.bmp *.tiff")]
+        )
+        if path:
+            # Validate file size (limit to 5MB for profile pictures)
+            if os.path.getsize(path) > 5 * 1024 * 1024:
+                messagebox.showerror("File Too Large", "Profile picture must be under 5MB.")
+                return
+            self.profile_pic_path.set(path)
+            filename = os.path.basename(path)
+            self.profile_pic_label.config(text=f"Selected: {filename}")
+        else:
+            self.profile_pic_path.set("")
+            self.profile_pic_label.config(text="No image selected")
 
     def _show_server_settings(self):
         self.server_frame.pack(fill=tk.X, before=self.custom_btn)
@@ -737,9 +769,21 @@ class ChatClient:
         pwd  = self.pass_var.get().strip()
         url  = self.url_var.get().strip() or self.server_url
         if not user: return
-        
+
         hashed_pwd = hashlib.sha256(pwd.encode()).hexdigest()
         mode = self.auth_mode.get()
+
+        # Prepare profile picture data if selected
+        profile_pic_data = None
+        profile_pic_filename = None
+        if self.profile_pic_path.get():
+            try:
+                with open(self.profile_pic_path.get(), "rb") as f:
+                    profile_pic_data = base64.b64encode(f.read()).decode("ascii")
+                profile_pic_filename = os.path.basename(self.profile_pic_path.get())
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to read profile picture: {e}")
+                return
 
         if url != self.server_url:
             # Different server — update and force reconnect
@@ -749,13 +793,17 @@ class ChatClient:
                 asyncio.run_coroutine_threadsafe(self.ws.close(), self.loop)
         else:
             # Same server — send auth directly on open connection
-            self._schedule_send({
+            payload = {
                 "type": mode,
                 "sender": user,
                 "password": hashed_pwd,
                 "sync": self.sync_var.get(),
                 "remember": self.remember_var.get()
-            })
+            }
+            if profile_pic_data and mode == "register":
+                payload["profile_pic_data"] = profile_pic_data
+                payload["profile_pic_filename"] = profile_pic_filename
+            self._schedule_send(payload)
 
     def _flush_sync_buffer(self):
         if not hasattr(self, "chat_display"): return
