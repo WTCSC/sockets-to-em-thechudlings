@@ -35,6 +35,110 @@ CHUDSERVE_URL = "wss://mediastation.tail76b4d2.ts.net"
 CHANNELS = ["General", "Testing", "ChudSpeaks"]
 SESSION_FILE = ".chud_session"
 
+# Theme definitions
+THEMES = {
+    "Dark": {
+        "bg_primary": "#1E1E2E",      # Main background
+        "bg_secondary": "#181825",   # Sidebar, chat area
+        "bg_tertiary": "#11111B",    # Footer, inputs
+        "bg_accent": "#313244",      # Buttons, entries
+        "fg_primary": "#CDD6F4",     # Main text
+        "fg_secondary": "#A6ADC8",   # Secondary text
+        "fg_accent": "#89B4FA",      # Links, highlights
+        "fg_sender_me": "#89B4FA",   # My messages
+        "fg_sender_other": "#A6E3A1", # Others' messages
+        "fg_mention": "#FAB387",     # Mentions background
+        "fg_info": "#585B70",        # Info messages
+        "fg_timestamp": "#45475A",   # Timestamps
+        "btn_primary": "#89B4FA",    # Primary buttons
+        "btn_secondary": "#313244",  # Secondary buttons
+        "btn_danger": "#F38BA8",     # Danger buttons
+        "border": "#45475A",         # Borders
+        "font_family": "Arial",
+        "font_size": 14
+    },
+    "Light": {
+        "bg_primary": "#FFFFFF",     # Main background
+        "bg_secondary": "#F8F9FA",   # Sidebar, chat area
+        "bg_tertiary": "#E9ECEF",    # Footer, inputs
+        "bg_accent": "#DEE2E6",      # Buttons, entries
+        "fg_primary": "#212529",     # Main text
+        "fg_secondary": "#6C757D",   # Secondary text
+        "fg_accent": "#007BFF",      # Links, highlights
+        "fg_sender_me": "#007BFF",   # My messages
+        "fg_sender_other": "#28A745", # Others' messages
+        "fg_mention": "#FFC107",     # Mentions background
+        "fg_info": "#6C757D",        # Info messages
+        "fg_timestamp": "#ADB5BD",   # Timestamps
+        "btn_primary": "#007BFF",    # Primary buttons
+        "btn_secondary": "#6C757D",  # Secondary buttons
+        "btn_danger": "#DC3545",     # Danger buttons
+        "border": "#DEE2E6",         # Borders
+        "font_family": "Segoe UI",
+        "font_size": 14
+    },
+    "Neon": {
+        "bg_primary": "#0D0D0D",     # Main background
+        "bg_secondary": "#1A1A1A",   # Sidebar, chat area
+        "bg_tertiary": "#2A2A2A",    # Footer, inputs
+        "bg_accent": "#3A3A3A",      # Buttons, entries
+        "fg_primary": "#00FF88",     # Main text
+        "fg_secondary": "#00CCFF",   # Secondary text
+        "fg_accent": "#FF0080",      # Links, highlights
+        "fg_sender_me": "#FF0080",   # My messages
+        "fg_sender_other": "#00FF88", # Others' messages
+        "fg_mention": "#FFFF00",     # Mentions background
+        "fg_info": "#888888",        # Info messages
+        "fg_timestamp": "#666666",   # Timestamps
+        "btn_primary": "#FF0080",    # Primary buttons
+        "btn_secondary": "#3A3A3A",  # Secondary buttons
+        "btn_danger": "#FF4444",     # Danger buttons
+        "border": "#555555",         # Borders
+        "font_family": "Courier New",
+        "font_size": 12
+    },
+    "Retro": {
+        "bg_primary": "#2B2B2B",     # Main background
+        "bg_secondary": "#1F1F1F",   # Sidebar, chat area
+        "bg_tertiary": "#3F3F3F",    # Footer, inputs
+        "bg_accent": "#4F4F4F",      # Buttons, entries
+        "fg_primary": "#F0F0F0",     # Main text
+        "fg_secondary": "#CCCCCC",   # Secondary text
+        "fg_accent": "#FFD700",      # Links, highlights
+        "fg_sender_me": "#FFD700",   # My messages
+        "fg_sender_other": "#98FB98", # Others' messages
+        "fg_mention": "#FFA500",     # Mentions background
+        "fg_info": "#808080",        # Info messages
+        "fg_timestamp": "#A0A0A0",   # Timestamps
+        "btn_primary": "#FFD700",    # Primary buttons
+        "btn_secondary": "#4F4F4F",  # Secondary buttons
+        "btn_danger": "#FF6347",     # Danger buttons
+        "border": "#606060",         # Borders
+        "font_family": "Consolas",
+        "font_size": 13
+    },
+    "Crazy Pink": {
+        "bg_primary": "#FF1493",      # Hot pink main background
+        "bg_secondary": "#FF69B4",    # Hot pink sidebar, chat area
+        "bg_tertiary": "#FFB6C1",     # Light pink footer, inputs
+        "bg_accent": "#FFC0CB",       # Pink buttons, entries
+        "fg_primary": "#FFFF00",      # Bright yellow main text
+        "fg_secondary": "#00FFFF",    # Cyan secondary text
+        "fg_accent": "#FF00FF",       # Magenta links, highlights
+        "fg_sender_me": "#00FF00",    # Bright green my messages
+        "fg_sender_other": "#FF4500", # Orange red others' messages
+        "fg_mention": "#FFD700",      # Gold mentions background
+        "fg_info": "#FFFFFF",         # White info messages
+        "fg_timestamp": "#FF6347",    # Tomato timestamps
+        "btn_primary": "#DC143C",     # Crimson primary buttons
+        "btn_secondary": "#FF1493",   # Hot pink secondary buttons
+        "btn_danger": "#FFFF00",      # Yellow danger buttons
+        "border": "#FF00FF",          # Magenta borders
+        "font_family": "Comic Sans MS",
+        "font_size": 16
+    }
+}
+
 class AnimatedImage:
     def __init__(self, label, data, chat_display):
         self.label = label
@@ -121,6 +225,7 @@ class ChatClient:
         self.profile_pic_id = None
         self.user_description = ""
         self.user_mood = ""
+        self.current_theme = "Dark"  # Default theme
 
         # Start background connection immediately
         self.loop = asyncio.new_event_loop()
@@ -324,7 +429,7 @@ class ChatClient:
         self.chat_display.tag_config("sender_other", foreground="#A6E3A1", font=("Arial", 14, "bold"))
         self.chat_display.tag_config("mention", background="#FAB387", foreground="#1E1E2E", font=("Arial", 14, "bold"))
         self.chat_display.tag_config("reply", foreground="#585B70", font=("Arial", 12, "italic"))
-            self.chat_display.tag_config("file", foreground="#F38BA8")
+        self.chat_display.tag_config("file", foreground="#F38BA8")
         # Tags
 
         # Markdown tags
@@ -743,33 +848,184 @@ class ChatClient:
         if hasattr(self, "status_label") and self.status_label.winfo_exists():
             self.status_label.configure(fg=color)
 
+    def _apply_theme(self):
+        """Apply the current theme to all UI elements."""
+        if self.current_theme not in THEMES:
+            return
+
+        theme = THEMES[self.current_theme]
+
+        # Apply to root window
+        self.root.configure(bg=theme["bg_primary"])
+
+        # Apply to login frame if it exists
+        if hasattr(self, "login_frame") and self.login_frame.winfo_exists():
+            self.login_frame.configure(bg=theme["bg_primary"])
+            # Update all login widgets
+            for widget in self.login_frame.winfo_children():
+                if isinstance(widget, tk.Label):
+                    widget.configure(bg=theme["bg_primary"], fg=theme["fg_primary"])
+                elif isinstance(widget, tk.Entry):
+                    widget.configure(bg=theme["bg_accent"], fg=theme["fg_primary"], insertbackground=theme["fg_primary"])
+                elif isinstance(widget, tk.Button):
+                    widget.configure(bg=theme["btn_primary"], fg=theme["bg_primary"])
+                elif isinstance(widget, tk.Radiobutton):
+                    widget.configure(bg=theme["bg_primary"], fg=theme["fg_secondary"], selectcolor=theme["bg_accent"])
+                elif isinstance(widget, tk.Checkbutton):
+                    widget.configure(bg=theme["bg_primary"], fg=theme["fg_secondary"], selectcolor=theme["bg_accent"])
+                elif isinstance(widget, tk.Frame):
+                    widget.configure(bg=theme["bg_primary"])
+
+        # Apply to main chat UI
+        if hasattr(self, "main_pane") and self.main_pane.winfo_exists():
+            self.main_pane.configure(bg=theme["bg_primary"])
+
+            # Sidebar
+            sidebar = self.main_pane.winfo_children()[0] if self.main_pane.winfo_children() else None
+            if sidebar:
+                sidebar.configure(bg=theme["bg_secondary"])
+                for widget in sidebar.winfo_children():
+                    if isinstance(widget, tk.Label):
+                        widget.configure(bg=theme["bg_secondary"], fg=theme["fg_secondary"])
+                    elif isinstance(widget, tk.Frame):
+                        widget.configure(bg=theme["bg_secondary"])
+                        # Update buttons in frames
+                        for btn in widget.winfo_children():
+                            if isinstance(btn, tkButton):
+                                if btn.cget("bg") == "#89B4FA":  # Selected channel
+                                    btn.configure(bg=theme["btn_primary"], fg=theme["bg_primary"])
+                                else:
+                                    btn.configure(bg=theme["bg_secondary"], fg=theme["fg_primary"])
+                    elif isinstance(widget, tkButton):
+                        if widget.cget("bg") == "#89B4FA":  # Selected channel
+                            widget.configure(bg=theme["btn_primary"], fg=theme["bg_primary"])
+                        else:
+                            widget.configure(bg=theme["bg_secondary"], fg=theme["fg_primary"])
+
+            # Chat container
+            chat_container = self.main_pane.winfo_children()[1] if len(self.main_pane.winfo_children()) > 1 else None
+            if chat_container:
+                chat_container.configure(bg=theme["bg_primary"])
+
+                # Chat display
+                if hasattr(self, "chat_display") and self.chat_display.winfo_exists():
+                    self.chat_display.configure(
+                        bg=theme["bg_secondary"],
+                        fg=theme["fg_primary"],
+                        insertbackground=theme["fg_primary"]
+                    )
+                    # Update tag colors
+                    self.chat_display.tag_config("info", foreground=theme["fg_info"])
+                    self.chat_display.tag_config("timestamp", foreground=theme["fg_timestamp"])
+                    self.chat_display.tag_config("sender_me", foreground=theme["fg_sender_me"])
+                    self.chat_display.tag_config("sender_other", foreground=theme["fg_sender_other"])
+                    self.chat_display.tag_config("mention", background=theme["fg_mention"], foreground=theme["bg_primary"])
+                    self.chat_display.tag_config("reply", foreground=theme["fg_info"])
+                    self.chat_display.tag_config("code", background=theme["bg_accent"], foreground=theme["fg_accent"])
+                    self.chat_display.tag_config("link", foreground=theme["fg_accent"])
+                    self.chat_display.tag_config("channel_link", foreground=theme["fg_sender_other"])
+
+                # Emoji frame
+                if hasattr(self, "emoji_frame") and self.emoji_frame.winfo_exists():
+                    self.emoji_frame.configure(bg=theme["bg_primary"])
+                    for btn in self.emoji_frame.winfo_children():
+                        if isinstance(btn, tkButton):
+                            btn.configure(bg=theme["bg_accent"], fg=theme["fg_primary"])
+
+                # Input frame
+                input_frame = chat_container.winfo_children()[2] if len(chat_container.winfo_children()) > 2 else None
+                if input_frame:
+                    input_frame.configure(bg=theme["bg_accent"])
+                    for widget in input_frame.winfo_children():
+                        if isinstance(widget, tk.Text):
+                            widget.configure(bg=theme["bg_accent"], fg=theme["fg_primary"], insertbackground=theme["fg_primary"])
+                        elif isinstance(btn, tkButton):
+                            btn.configure(bg=theme["btn_primary"], fg=theme["bg_primary"])
+
+                # Typing label
+                if hasattr(self, "typing_label") and self.typing_label.winfo_exists():
+                    self.typing_label.configure(bg=theme["bg_primary"], fg=theme["fg_secondary"])
+
+                # Reply frame
+                if hasattr(self, "reply_frame") and self.reply_frame.winfo_exists():
+                    self.reply_frame.configure(bg=theme["bg_tertiary"])
+                    for widget in self.reply_frame.winfo_children():
+                        if isinstance(widget, tk.Label):
+                            widget.configure(bg=theme["bg_tertiary"], fg=theme["fg_secondary"])
+                        elif isinstance(widget, tkButton):
+                            widget.configure(bg=theme["bg_tertiary"], fg=theme["btn_danger"])
+
+        # Footer
+        footer = self.root.winfo_children()[-1] if self.root.winfo_children() else None
+        if footer and isinstance(footer, tk.Frame):
+            footer.configure(bg=theme["bg_tertiary"])
+            for widget in footer.winfo_children():
+                if isinstance(widget, tk.Label):
+                    widget.configure(bg=theme["bg_tertiary"], fg=theme["fg_info"])
+                elif isinstance(widget, tkButton):
+                    widget.configure(bg=theme["btn_danger"], fg=theme["bg_primary"])
+
+        # Update fonts throughout the UI
+        font_family = theme["font_family"]
+        font_size = theme["font_size"]
+
+        def update_fonts(widget):
+            try:
+                current_font = widget.cget("font")
+                if isinstance(current_font, str):
+                    # Parse font string like "Arial 14 bold"
+                    parts = current_font.split()
+                    if len(parts) >= 2:
+                        new_font = (font_family, font_size, *parts[2:])
+                        widget.configure(font=new_font)
+                elif isinstance(current_font, tuple):
+                    new_font = (font_family, font_size, *current_font[2:])
+                    widget.configure(font=new_font)
+            except:
+                pass
+
+        # Apply font updates to key widgets
+        if hasattr(self, "chat_display") and self.chat_display.winfo_exists():
+            update_fonts(self.chat_display)
+
     def _open_profile(self):
         win = tk.Toplevel(self.root)
         win.title("Profile")
-        win.geometry("400x300")
-        win.configure(bg="#1E1E2E")
+        win.geometry("400x350")
+        win.configure(bg=THEMES[self.current_theme]["bg_primary"])
 
-        tk.Label(win, text="Description", font=("Arial", 14), bg="#1E1E2E", fg="#CDD6F4").pack(pady=(20, 5))
+        tk.Label(win, text="Description", font=(THEMES[self.current_theme]["font_family"], 14), bg=THEMES[self.current_theme]["bg_primary"], fg=THEMES[self.current_theme]["fg_primary"]).pack(pady=(20, 5))
 
         desc_var = tk.StringVar(value=self.user_description)
-        desc_entry = tk.Entry(win, textvariable=desc_var, font=("Arial", 14), bg="#313244", fg="#CDD6F4", insertbackground="white", relief=tk.FLAT)
+        desc_entry = tk.Entry(win, textvariable=desc_var, font=(THEMES[self.current_theme]["font_family"], 14), bg=THEMES[self.current_theme]["bg_accent"], fg=THEMES[self.current_theme]["fg_primary"], insertbackground=THEMES[self.current_theme]["fg_primary"], relief=tk.FLAT)
         desc_entry.pack(fill=tk.X, padx=20, pady=(0, 10))
 
-        tk.Label(win, text="Mood Emoji", font=("Arial", 14), bg="#1E1E2E", fg="#CDD6F4").pack(pady=(10, 5))
+        tk.Label(win, text="Mood Emoji", font=(THEMES[self.current_theme]["font_family"], 14), bg=THEMES[self.current_theme]["bg_primary"], fg=THEMES[self.current_theme]["fg_primary"]).pack(pady=(10, 5))
 
         mood_var = tk.StringVar(value=self.user_mood)
-        mood_entry = tk.Entry(win, textvariable=mood_var, font=("Arial", 14), bg="#313244", fg="#CDD6F4", insertbackground="white", relief=tk.FLAT)
-        mood_entry.pack(fill=tk.X, padx=20, pady=(0, 20))
+        mood_entry = tk.Entry(win, textvariable=mood_var, font=(THEMES[self.current_theme]["font_family"], 14), bg=THEMES[self.current_theme]["bg_accent"], fg=THEMES[self.current_theme]["fg_primary"], insertbackground=THEMES[self.current_theme]["fg_primary"], relief=tk.FLAT)
+        mood_entry.pack(fill=tk.X, padx=20, pady=(0, 10))
+
+        tk.Label(win, text="Theme", font=(THEMES[self.current_theme]["font_family"], 14), bg=THEMES[self.current_theme]["bg_primary"], fg=THEMES[self.current_theme]["fg_primary"]).pack(pady=(10, 5))
+
+        theme_var = tk.StringVar(value=self.current_theme)
+        theme_menu = tk.OptionMenu(win, theme_var, *THEMES.keys())
+        theme_menu.config(bg=THEMES[self.current_theme]["bg_accent"], fg=THEMES[self.current_theme]["fg_primary"], relief=tk.FLAT, font=(THEMES[self.current_theme]["font_family"], 12), highlightthickness=0)
+        theme_menu.pack(pady=(0, 20))
 
         def save():
             desc = desc_var.get()
             mood = mood_var.get()
-            self._schedule_send({"type": "update_profile", "description": desc, "mood_emoji": mood})
+            theme = theme_var.get()
+            self._schedule_send({"type": "update_profile", "description": desc, "mood_emoji": mood, "theme": theme})
             self.user_description = desc
             self.user_mood = mood
+            if theme != self.current_theme:
+                self.current_theme = theme
+                self._apply_theme()
             win.destroy()
 
-        tkButton(win, text="SAVE", command=save, bg="#89B4FA", fg="#1E1E2E", font=("Arial", 12, "bold"), relief=tk.FLAT, cursor="hand2", padx=20, pady=10).pack()
+        tkButton(win, text="SAVE", command=save, bg=THEMES[self.current_theme]["btn_primary"], fg=THEMES[self.current_theme]["bg_primary"], font=(THEMES[self.current_theme]["font_family"], 12, "bold"), relief=tk.FLAT, cursor="hand2", padx=20, pady=10).pack()
 
     def _open_settings(self):
         win = tk.Toplevel(self.root)
@@ -963,6 +1219,9 @@ class ChatClient:
                 self.profile_pic_id = msg.get("profile_pic")
                 self.user_description = msg.get("description", "")
                 self.user_mood = msg.get("mood_emoji", "")
+                user_theme = msg.get("theme", "Dark")
+                if user_theme in THEMES and user_theme != self.current_theme:
+                    self.current_theme = user_theme
                 if self.profile_pic_id:
                     self._schedule_send({"type": "file_request", "file_id": self.profile_pic_id})
                 already_joined = self.joined

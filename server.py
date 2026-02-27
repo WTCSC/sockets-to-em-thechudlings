@@ -226,7 +226,7 @@ async def handler(ws):
                     await ws.send(json.dumps({"type": "auth_error", "content": "Username taken"}))
                 else:
                     salt, phash = hash_pass(password)
-                    user_data = {"salt": salt, "hash": phash, "description": "", "mood_emoji": ""}
+                    user_data = {"salt": salt, "hash": phash, "description": "", "mood_emoji": "", "theme": "Dark"}
                     # Handle profile picture if provided
                     profile_pic_data = msg.get("profile_pic_data")
                     profile_pic_filename = msg.get("profile_pic_filename")
@@ -288,7 +288,8 @@ async def handler(ws):
             "token": new_token,
             "profile_pic": user_data.get("profile_pic"),
             "description": user_data.get("description", ""),
-            "mood_emoji": user_data.get("mood_emoji", "")
+            "mood_emoji": user_data.get("mood_emoji", ""),
+            "theme": user_data.get("theme", "Dark")
         }))
         await broadcast_users()
 
@@ -519,9 +520,11 @@ async def handler(ws):
             elif msg_type == "update_profile":
                 desc = msg.get("description", "")
                 mood = msg.get("mood_emoji", "")
+                theme = msg.get("theme", "Dark")
                 if username in users_db:
                     users_db[username]["description"] = desc
                     users_db[username]["mood_emoji"] = mood
+                    users_db[username]["theme"] = theme
                     save_users()
 
             elif msg_type == "pm":
